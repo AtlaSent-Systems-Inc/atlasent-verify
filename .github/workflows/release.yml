@@ -1,0 +1,226 @@
+name: release
+
+# Builds the external `atlasent-audit-verify` CLI for every supported
+# platform on every push to a release tag and uploads signed artifacts
+# to a GitHub Release. Specified by ADR-020 § "Distribution & trust".
+#
+# Trigger:
+#   git tag vX.Y.Z && git push --tags
+#
+# What this workflow does:
+#   1. Builds a fully-static binary for each platform in the matrix.
+#   2. Computes SHA-256 checksums for each artifact.
+#   3. Signs each artifact + the checksum file with Sigstore Cosign
+#      (keyless OIDC signing). Anyone can verify via:
+#        cosign verify-blob \
+#          --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-verify/.*' \
+#          --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#          --signature <artifact>.sig \
+#          --certificate <artifact>.pem \
+#          <artifact>
+#   4. Publishes the artifacts + checksums + signatures + certs to a
+#      GitHub Release tagged with the input tag.
+#
+# Reproducibility:
+#   * -trimpath strips local paths.
+#   * -buildid= removes the build ID.
+#   * Version is stamped via -ldflags from the tag.
+#   * No CGO; pure-Go static binaries.
+#   * Same Go version pinned across the matrix.
+#   The byte-identical-builds guarantee is **verified on every PR** by
+#   .github/workflows/reproducibility.yml. If any change to the build
+#   flags below regresses reproducibility, that workflow fails and the
+#   PR cannot land. Build flags here and there MUST stay in sync.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Manual version label (e.g. v0.1.0-dev)'
+        required: true
+
+permissions:
+  contents: write     # to create the GitHub Release + upload assets
+  id-token: write     # to obtain the OIDC token for Sigstore keyless signing
+
+env:
+  GO_VERSION: '1.24'
+
+jobs:
+  build:
+    name: build ${{ matrix.os }}/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            ext: ''
+          - os: linux
+            arch: arm64
+            ext: ''
+          - os: darwin
+            arch: amd64
+            ext: ''
+          - os: darwin
+            arch: arm64
+            ext: ''
+          - os: windows
+            arch: amd64
+            ext: '.exe'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: Derive version label
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "label=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Tag form: refs/tags/vX.Y.Z → vX.Y.Z
+            echo "label=${GITHUB_REF##refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build static binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          out="atlasent-audit-verify-${{ steps.version.outputs.label }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags "-s -w -buildid= -X main.Version=${{ steps.version.outputs.label }}" \
+            -o "dist/$out" \
+            ./cmd/atlasent-audit-verify
+          ls -la dist/
+
+      - name: Compute SHA-256
+        working-directory: dist
+        run: |
+          out="atlasent-audit-verify-${{ steps.version.outputs.label }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          sha256sum "$out" | tee "$out.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/atlasent-audit-verify-*
+
+  sign-and-release:
+    name: Sign and publish release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Derive version label
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "label=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "label=${GITHUB_REF##refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          pattern: build-*
+          merge-multiple: true
+
+      - name: Aggregate checksums
+        working-directory: dist
+        run: |
+          ls -la
+          # Build the canonical CHECKSUMS.txt covering every binary.
+          # Format matches `sha256sum -c` consumption.
+          : > CHECKSUMS.txt
+          for f in atlasent-audit-verify-*; do
+            # Skip individual .sha256 files; we re-compute.
+            case "$f" in
+              *.sha256|*.sig|*.pem|CHECKSUMS.txt|CHECKSUMS.txt.sig|CHECKSUMS.txt.pem) continue ;;
+            esac
+            sha256sum "$f" >> CHECKSUMS.txt
+          done
+          cat CHECKSUMS.txt
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.0'
+
+      - name: Sign each binary (keyless OIDC)
+        working-directory: dist
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          for f in atlasent-audit-verify-*; do
+            case "$f" in
+              *.sha256|*.sig|*.pem|CHECKSUMS.txt*) continue ;;
+            esac
+            echo "::group::Signing $f"
+            cosign sign-blob \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.pem" \
+              "$f"
+            echo "::endgroup::"
+          done
+
+      - name: Sign aggregate checksums
+        working-directory: dist
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          cosign sign-blob \
+            --output-signature CHECKSUMS.txt.sig \
+            --output-certificate CHECKSUMS.txt.pem \
+            CHECKSUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: atlasent-audit-verify ${{ steps.version.outputs.label }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            External AtlaSent audit-chain verifier — ADR-020.
+
+            Each binary is signed with Sigstore Cosign (keyless OIDC).
+            Verify any artifact:
+
+            ```
+            cosign verify-blob \
+              --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-verify/.*' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --signature <artifact>.sig \
+              --certificate <artifact>.pem \
+              <artifact>
+            ```
+
+            Or verify the aggregate checksum file (`CHECKSUMS.txt.sig` + `.pem`)
+            once, then `sha256sum -c CHECKSUMS.txt` for each artifact you
+            downloaded.
+
+            Build reproducibility: byte-identical-builds are verified on
+            every PR by the reproducibility workflow.
+
+            Canonical-form version supported: chain v5
+            (atlasent-docs/architecture/specs/audit-chain-canonical-form.md).
+          fail_on_unmatched_files: true
+          files: |
+            dist/atlasent-audit-verify-*
+            dist/CHECKSUMS.txt
+            dist/CHECKSUMS.txt.sig
+            dist/CHECKSUMS.txt.pem

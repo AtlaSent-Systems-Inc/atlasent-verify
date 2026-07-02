@@ -1,0 +1,250 @@
+name: canary
+
+# Weekly canary that exercises the AtlaSent audit-verify trust chain
+# end-to-end and reports the result as a published workflow artifact.
+#
+# What this catches that build-time CI does not:
+#
+#   1. Sigstore TUF root rotations. Released binaries are signed at
+#      release time; if Sigstore rotates its trust roots, an old .sig
+#      may fail to verify against the *current* Sigstore TUF root. The
+#      canary fetches the latest released binary and re-verifies its
+#      signature with current cosign and current TUF root — surfacing
+#      breakage within a week, not at the next release.
+#
+#   2. Fulcio certificate / OIDC drift. Keyless OIDC certificates are
+#      short-lived. The transparency-log entry remains valid forever,
+#      but operator tooling can drift. The canary confirms cosign
+#      verify-blob still resolves the transparency entry correctly.
+#
+#   3. Verifier-source rot. The canary builds the verifier from
+#      current source and runs `go test` against the golden fixtures.
+#      If a dependency or Go-toolchain change silently breaks
+#      correctness against known-good inputs, this fires before any
+#      operator notices.
+#
+# What this canary does NOT do:
+#
+#   - It does not replace the human quarterly proof documented in
+#     atlasent-internal/runbooks/external-audit-verify-proof.md. That
+#     runbook is the canonical *proof*; this canary is the
+#     *early-warning* that the procedure has silently broken between
+#     human runs.
+#   - It does not connect to a live endpoint or fetch real-tenant
+#     bundles.
+#   - It does not auto-publish or open issues on failure. A red run is
+#     visible in the workflow list; the operator on-call triages.
+
+on:
+  schedule:
+    # Mondays 12:00 UTC — weekly. Tuned to be slightly off-peak so a
+    # quiet failure isn't masked by Monday-morning deploy traffic.
+    - cron: '0 12 * * 1'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Specific v* tag to verify (default: latest)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.24'
+
+jobs:
+  canary:
+    name: verify trust chain + verifier correctness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.0'
+
+      # ----------------------------------------------------------------
+      # Step 1: Source rot check. Build the verifier from current source
+      # using the canonical release flags. Failure here means the source
+      # cannot be built reproducibly today.
+      # ----------------------------------------------------------------
+      - name: Build verifier from current source
+        id: build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags "-s -w -buildid= -X main.Version=canary-${GITHUB_SHA::8}" \
+            -o /tmp/atlasent-audit-verify-current \
+            ./cmd/atlasent-audit-verify
+          sha256sum /tmp/atlasent-audit-verify-current | tee /tmp/current-build.sha256
+          echo "::notice::Verifier built from current source ($(awk '{print $1}' /tmp/current-build.sha256))"
+
+      # ----------------------------------------------------------------
+      # Step 2: Verifier-correctness check. Run go test against the
+      # golden fixtures. Failure means the verifier's chain math,
+      # canonical-form parser, or signature verification has regressed
+      # against its own known-good inputs.
+      # ----------------------------------------------------------------
+      - name: Verify correctness against golden fixtures
+        run: |
+          go test -race -count=1 ./...
+          echo "::notice::Golden fixture verification PASSED."
+
+      # ----------------------------------------------------------------
+      # Step 3: Trust-chain check. Fetch the latest published v*
+      # release and re-verify its signature with current cosign +
+      # current Sigstore TUF root. Graceful skip if no release exists.
+      # ----------------------------------------------------------------
+      - name: Identify release to verify
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+            echo "Using operator-specified tag: $TAG"
+          else
+            TAG=$(gh release list --limit 100 --json tagName \
+              --jq '.[].tagName' \
+              | grep '^v' \
+              | head -1 || true)
+            if [ -z "$TAG" ]; then
+              echo "::notice::No v* release exists yet. Skipping trust-chain check."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Latest release: $TAG"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifacts
+        if: steps.release.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/released
+          cd /tmp/released
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --pattern 'atlasent-audit-verify-*-linux-amd64' \
+            --pattern 'atlasent-audit-verify-*-linux-amd64.sig' \
+            --pattern 'atlasent-audit-verify-*-linux-amd64.pem' \
+            --pattern 'CHECKSUMS.txt' \
+            --pattern 'CHECKSUMS.txt.sig' \
+            --pattern 'CHECKSUMS.txt.pem'
+          ls -la
+
+      - name: Verify released binary signature (cosign keyless)
+        if: steps.release.outputs.skip != 'true'
+        working-directory: /tmp/released
+        run: |
+          BIN=$(ls atlasent-audit-verify-*-linux-amd64 | grep -v '\.\(sig\|pem\|sha256\)$' | head -1)
+          if [ -z "$BIN" ]; then
+            echo "::error::No linux/amd64 binary found in release ${{ steps.release.outputs.tag }}"
+            exit 1
+          fi
+          echo "Verifying $BIN"
+          cosign verify-blob \
+            --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-verify/.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --signature "$BIN.sig" \
+            --certificate "$BIN.pem" \
+            "$BIN"
+          echo "::notice::Trust-chain check PASSED for $BIN (release ${{ steps.release.outputs.tag }})"
+
+      - name: Verify CHECKSUMS.txt signature
+        if: steps.release.outputs.skip != 'true'
+        working-directory: /tmp/released
+        run: |
+          if [ ! -f CHECKSUMS.txt ]; then
+            echo "::notice::No CHECKSUMS.txt in this release; skipping aggregate-signature check"
+            exit 0
+          fi
+          cosign verify-blob \
+            --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-verify/.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --signature CHECKSUMS.txt.sig \
+            --certificate CHECKSUMS.txt.pem \
+            CHECKSUMS.txt
+          echo "::notice::CHECKSUMS.txt aggregate signature verified."
+
+      # ----------------------------------------------------------------
+      # Step 4: Sanity — run the released binary, confirm it executes
+      # and reports its own version.
+      # ----------------------------------------------------------------
+      - name: Smoke-test the released binary
+        if: steps.release.outputs.skip != 'true'
+        working-directory: /tmp/released
+        run: |
+          BIN=$(ls atlasent-audit-verify-*-linux-amd64 | grep -v '\.\(sig\|pem\|sha256\)$' | head -1)
+          chmod +x "$BIN"
+          "./$BIN" --version
+          echo "::notice::Released binary executes and reports version."
+
+      # ----------------------------------------------------------------
+      # Step 5: Publish the canary evidence. Always uploaded so
+      # operators triaging a red run have diagnostic context.
+      # ----------------------------------------------------------------
+      - name: Write canary evidence record
+        if: ${{ always() }}
+        run: |
+          mkdir -p /tmp/canary-evidence
+          cat > /tmp/canary-evidence/canary-record.md <<EOF
+          # audit-verify canary — ${GITHUB_RUN_ID}
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          Timestamp (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Triggered by: ${GITHUB_EVENT_NAME}
+          Commit: ${GITHUB_SHA}
+
+          ## Steps executed
+
+          - Source build (current main): ${{ steps.build.outcome }}
+          - Golden-fixture verification: ${{ job.status }}
+          - Trust-chain verification: ${{ steps.release.outputs.skip == 'true' && 'skipped (no release tag yet)' || job.status }}
+          - Released-binary smoke test: ${{ steps.release.outputs.skip == 'true' && 'skipped' || job.status }}
+
+          ## Release verified (if any)
+
+          Tag: ${{ steps.release.outputs.tag || '(none yet)' }}
+          Skipped: ${{ steps.release.outputs.skip || 'false' }}
+
+          ## Current-source build SHA-256
+
+          $(cat /tmp/current-build.sha256 2>/dev/null || echo '(build did not complete)')
+
+          ## Outcome
+
+          Job status: ${{ job.status }}
+
+          See atlasent-internal/runbooks/external-audit-verify-proof.md
+          for the human quarterly proof procedure that this canary
+          supplements.
+          EOF
+          cat /tmp/canary-evidence/canary-record.md
+          cp /tmp/current-build.sha256 /tmp/canary-evidence/ 2>/dev/null || true
+
+      - name: Upload canary evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: audit-verify-canary-${{ github.run_id }}
+          path: /tmp/canary-evidence/
+          retention-days: 90

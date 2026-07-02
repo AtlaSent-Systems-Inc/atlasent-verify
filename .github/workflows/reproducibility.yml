@@ -1,0 +1,130 @@
+name: reproducibility
+
+# Reproducibility attestation for the external `atlasent-audit-verify`
+# Go CLI. Builds the binary twice with identical flags and asserts a
+# byte-identical SHA-256 across both builds.
+#
+# If reproducibility ever regresses (a new build flag, a path leak, a
+# non-deterministic dependency, an embedded timestamp), this job fails
+# and the PR cannot land without an explicit reason.
+#
+# The build flags exactly mirror .github/workflows/release.yml so the
+# CI guarantee is binding on release artifacts.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/reproducibility.yml'
+      - '.github/workflows/release.yml'
+  pull_request:
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/reproducibility.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repro-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: '1.24'
+  # Fixed version stamp so both builds embed the same -X main.Version
+  # value. Without a pinned label, the version would vary across runs
+  # and break the byte-identical guarantee.
+  REPRO_VERSION: 'reproducibility-check'
+
+jobs:
+  build-twice:
+    name: build twice (linux/amd64) and compare SHA-256
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.mod
+
+      # Build #1 — identical flags to release.yml. Any divergence here
+      # must be reflected there or the CI guarantee does not bind
+      # release artifacts.
+      - name: Build #1
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags "-s -w -buildid= -X main.Version=${REPRO_VERSION}" \
+            -o /tmp/build-1/atlasent-audit-verify \
+            ./cmd/atlasent-audit-verify
+          ls -la /tmp/build-1
+          sha256sum /tmp/build-1/atlasent-audit-verify | tee /tmp/build-1.sha256
+
+      # Clean Go build cache between runs so build #2 cannot benefit
+      # from cached artifacts. Cache-hits would make the test trivially
+      # pass even if the inputs produced different outputs from cold.
+      - name: Clear Go build cache
+        run: |
+          go clean -cache
+          go clean -modcache || true
+
+      - name: Build #2
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags "-s -w -buildid= -X main.Version=${REPRO_VERSION}" \
+            -o /tmp/build-2/atlasent-audit-verify \
+            ./cmd/atlasent-audit-verify
+          ls -la /tmp/build-2
+          sha256sum /tmp/build-2/atlasent-audit-verify | tee /tmp/build-2.sha256
+
+      - name: Compare SHA-256
+        run: |
+          sha1=$(awk '{print $1}' /tmp/build-1.sha256)
+          sha2=$(awk '{print $1}' /tmp/build-2.sha256)
+          echo "Build #1 SHA-256: $sha1"
+          echo "Build #2 SHA-256: $sha2"
+          if [ "$sha1" != "$sha2" ]; then
+            echo "::error::Reproducibility check FAILED. The two builds produced different binaries."
+            echo ""
+            echo "Possible causes:"
+            echo "  - A new build flag was added to release.yml but not mirrored here (or vice versa)."
+            echo "  - A dependency embedded a non-deterministic value (timestamp, hostname, build path)."
+            echo "  - A Go toolchain change introduced new non-determinism."
+            echo ""
+            echo "Diff the binaries with:"
+            echo "  diffoscope /tmp/build-1/atlasent-audit-verify /tmp/build-2/atlasent-audit-verify"
+            exit 1
+          fi
+          echo "::notice::Reproducibility check PASSED. Both builds produced SHA-256 = $sha1"
+
+      # Even on success, expose the SHA-256 as a workflow artifact so a
+      # diligence reviewer can fetch the run's evidence row.
+      - name: Upload reproducibility evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: reproducibility-evidence-${{ github.run_id }}
+          path: |
+            /tmp/build-1.sha256
+            /tmp/build-2.sha256
+          retention-days: 90
