@@ -1,0 +1,11 @@
+# Build output
+/dist/
+/atlasent-audit-verify
+/atlasent-audit-verify.exe
+*.sig
+*.pem
+!internal/**/*.pem
+
+# Go
+*.test
+*.out

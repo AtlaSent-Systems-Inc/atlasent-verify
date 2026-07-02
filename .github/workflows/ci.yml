@@ -1,0 +1,54 @@
+name: CI
+
+# CI for the atlasent-audit-verify Go module. Runs on every PR —
+# vet, test (race), and a static build sanity check. Sibling to
+# release.yml which fires on tags to produce signed artifacts.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race -count=1 ./...
+
+      - name: static build sanity (linux/amd64)
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X main.Version=ci-${{ github.sha }}" \
+            -o /tmp/atlasent-audit-verify-static \
+            ./cmd/atlasent-audit-verify
+          file /tmp/atlasent-audit-verify-static | tee /tmp/build-info
+          # Confirm fully static (no NEEDED dynamic libs).
+          if grep -q "dynamically linked" /tmp/build-info; then
+            echo "::error::Binary is dynamically linked. Set CGO_ENABLED=0 and avoid net/os.User cgo paths."
+            exit 1
+          fi
+          /tmp/atlasent-audit-verify-static --version
