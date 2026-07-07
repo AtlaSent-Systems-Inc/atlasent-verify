@@ -62,9 +62,19 @@ type Finding struct {
 }
 
 // Result aggregates the verifier's findings + per-org head state.
+//
+// Findings are integrity failures (hash mismatches, chain breaks,
+// signature errors against a known key) that cause exit code 1.
+//
+// Warnings are non-fatal observations, for example an entry whose
+// key_version is not present in the supplied keystore: the hash chain
+// was still verified, but the signature could not be checked because
+// the key is not available. Warnings are printed to stderr and do not
+// affect the exit code.
 type Result struct {
 	EntriesScanned int
 	Findings       []Finding
+	Warnings       []Finding         // non-fatal; signature skipped for unknown key_version
 	HeadByOrg      map[string]int64  // org_id → last verified sequence
 	HeadHashByOrg  map[string]string // org_id → last verified entry_hash (lowercase hex)
 }
@@ -193,29 +203,37 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 		}
 
 		// Verify signature over the raw 32-byte entry_hash digest.
+		// Unknown key_version is a warning (not a finding): the hash chain
+		// was verified, but the signature cannot be checked without the key.
+		// A future key rotation or a partial keyset is a normal operational
+		// state and should not block chain verification.
 		if keys != nil {
 			pk, ok := keys.PublicKey(e.KeyVersion)
 			if !ok {
-				res.Findings = append(res.Findings, Finding{
+				res.Warnings = append(res.Warnings, Finding{
 					LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
-					Kind: "unknown_key", Detail: "key_version: " + e.KeyVersion,
+					Kind:   "unknown_key_version",
+					Detail: "key_version " + e.KeyVersion + " not in keystore; signature verification skipped for this entry",
 				})
-				continue
-			}
-			sig, err := decodeStd(e.Signature)
-			if err != nil {
-				res.Findings = append(res.Findings, Finding{
-					LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
-					Kind: "signature_decode", Detail: err.Error(),
-				})
-				continue
-			}
-			if !ed25519.Verify(pk, gotHash, sig) {
-				res.Findings = append(res.Findings, Finding{
-					LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
-					Kind: "signature_invalid",
-				})
-				continue
+				// Hash was verified above; advance state without sig check.
+			} else {
+				// Signature field format: "ed25519:<base64url>" (v5) or
+				// plain standard-base64 (legacy). decodeSignature handles both.
+				sig, err := decodeSignature(e.Signature)
+				if err != nil {
+					res.Findings = append(res.Findings, Finding{
+						LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
+						Kind: "signature_decode", Detail: err.Error(),
+					})
+					continue
+				}
+				if !ed25519.Verify(pk, gotHash, sig) {
+					res.Findings = append(res.Findings, Finding{
+						LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
+						Kind: "signature_invalid",
+					})
+					continue
+				}
 			}
 		}
 
@@ -231,11 +249,18 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 	return res, nil
 }
 
-// canonicalizeForHash strips entry_hash and signature from the raw
-// entry, then canonicalizes the remainder. The spec says
-// "canonical_payload is the UTF-8 bytes of the canonical
-// serialization of the entry with `entry_hash` and `signature`
-// fields removed."
+// canonicalizeForHash strips the fields that are excluded from the
+// chain hash, then canonicalizes the remainder.
+//
+// Per the canonical-form spec (v5):
+//
+//   - "entry_hash" and "signature" are always removed (they are the
+//     hash and its proof, not inputs to it).
+//   - "engine_version" is additive metadata — it was NOT included in
+//     the hash when the runtime produced the entry.  Removing it here
+//     keeps the verifier's recomputed hash consistent with the stored
+//     entry_hash regardless of whether the field is present in the
+//     exported JSON.
 func canonicalizeForHash(raw []byte) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -245,5 +270,6 @@ func canonicalizeForHash(raw []byte) ([]byte, error) {
 	}
 	delete(m, "entry_hash")
 	delete(m, "signature")
+	delete(m, "engine_version") // additive metadata — not in chain hash (audit chain v5)
 	return canonical.Bytes(m)
 }
