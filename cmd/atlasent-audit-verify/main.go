@@ -87,6 +87,12 @@ func main() {
 		chain.CheckAnchors(res, anchors)
 	}
 
+	// Print warnings (non-fatal: unknown key versions, etc.).
+	for _, w := range res.Warnings {
+		fmt.Fprintf(os.Stderr, "warn: L%d org=%s seq=%d %s: %s\n",
+			w.LineNumber, w.OrgID, w.Sequence, w.Kind, w.Detail)
+	}
+
 	if len(res.Findings) == 0 {
 		fmt.Fprintf(os.Stdout, "ok: %d entries verified across %d org(s)\n",
 			res.EntriesScanned, len(res.HeadByOrg))
