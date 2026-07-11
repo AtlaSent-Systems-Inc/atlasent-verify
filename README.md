@@ -155,6 +155,11 @@ internal/keys/               PEM keystore (kid → ed25519.PublicKey)
 go test ./...
 ```
 
+For a reproducible, audit-oriented validation checklist covering
+exported chain verification, signature verification, trust-root lookup,
+exit-code semantics, and release-artifact verification, see
+[`docs/independent-verifier-validation.md`](docs/independent-verifier-validation.md).
+
 Tests are golden-data driven: a small fixed chain is hashed, signed (with
 a fixture key), and re-verified. Any canonical-form drift in
 `internal/canonical` fails the golden test, so the test suite IS the
