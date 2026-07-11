@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,7 +54,16 @@ func Bytes(v any) ([]byte, error) {
 
 // FromJSON parses src as JSON (with json.Number for numeric fidelity)
 // and returns its canonical form. Convenience wrapper.
+//
+// Duplicate object keys are rejected with ErrDuplicateKey. Because
+// encoding/json silently collapses repeated keys (last value wins)
+// during Decode, the check runs over the raw token stream *before*
+// deserialization, where duplicates are still observable. This does
+// not affect the canonical bytes of any duplicate-free input.
 func FromJSON(src []byte) ([]byte, error) {
+	if err := checkNoDuplicateKeys(src); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(src))
 	dec.UseNumber()
 	var v any
@@ -64,6 +74,76 @@ func FromJSON(src []byte) ([]byte, error) {
 		return nil, errors.New("canonical: trailing data after top-level value")
 	}
 	return Bytes(v)
+}
+
+// checkNoDuplicateKeys scans src as a JSON token stream and returns
+// ErrDuplicateKey if any object contains a repeated key at the same
+// nesting level. It does not otherwise validate JSON structure —
+// structural errors are left for the caller's Decode to surface with a
+// precise message (this function returns nil on a token error and lets
+// the caller proceed to parse).
+func checkNoDuplicateKeys(src []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(src))
+	dec.UseNumber()
+
+	// Stack of open containers. For objects, keys records the keys seen
+	// so far and needKey is true when the next string token is a key
+	// (object tokens alternate key, value, key, value, ...). Arrays
+	// carry a nil keys map.
+	type level struct {
+		keys    map[string]struct{}
+		isObj   bool
+		needKey bool
+	}
+	var stack []*level
+
+	// markValueConsumed records that a complete value was just read in
+	// the current container; if that container is an object, the next
+	// token is a key again.
+	markValueConsumed := func() {
+		if n := len(stack); n > 0 && stack[n-1].isObj {
+			stack[n-1].needKey = true
+		}
+	}
+
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// Malformed JSON — defer to the caller's Decode for the
+			// precise error.
+			return nil
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{':
+				stack = append(stack, &level{keys: map[string]struct{}{}, isObj: true, needKey: true})
+			case '[':
+				stack = append(stack, &level{isObj: false})
+			case '}', ']':
+				stack = stack[:len(stack)-1]
+				markValueConsumed() // the closed container was a value in its parent
+			}
+			continue
+		}
+		// Scalar token (string, json.Number, bool, or nil).
+		if n := len(stack); n > 0 {
+			top := stack[n-1]
+			if top.isObj && top.needKey {
+				key, _ := tok.(string)
+				if _, dup := top.keys[key]; dup {
+					return fmt.Errorf("%w: %q", ErrDuplicateKey, key)
+				}
+				top.keys[key] = struct{}{}
+				top.needKey = false
+			} else {
+				markValueConsumed()
+			}
+		}
+	}
+	return nil
 }
 
 func encode(buf *bytes.Buffer, v any) error {
@@ -113,13 +193,11 @@ func encodeObject(buf *bytes.Buffer, m map[string]any) error {
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 
-	// Duplicate keys are impossible in Go map[string]any (the map
-	// would have collapsed them), but the spec disallows them at
-	// the JSON layer. A stricter implementation parses the raw
-	// JSON and detects duplicates pre-deserialization. For the V1
-	// scaffold we rely on json.Decoder behavior + a test that
-	// catches duplicate keys in raw JSON inputs at the entry
-	// boundary.
+	// Duplicate keys cannot appear here: a map[string]any has already
+	// collapsed them. The spec's "no duplicate object keys" invariant
+	// is enforced at the JSON entry boundary by FromJSON, which scans
+	// the raw token stream (via checkNoDuplicateKeys) before Decode and
+	// rejects repeats with ErrDuplicateKey.
 
 	buf.WriteByte('{')
 	for i, k := range keys {

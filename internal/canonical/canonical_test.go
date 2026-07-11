@@ -2,6 +2,7 @@ package canonical
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -144,6 +145,62 @@ func TestEmptyContainers(t *testing.T) {
 		if string(got) != c.want {
 			t.Errorf("FromJSON(%q) = %s, want %s", c.in, got, c.want)
 		}
+	}
+}
+
+func TestDuplicateKeyRejected(t *testing.T) {
+	cases := []string{
+		`{"a":1,"a":2}`,                  // top-level duplicate
+		`{"a":1,"b":2,"a":3}`,            // duplicate not adjacent
+		`{"o":{"x":1,"x":2}}`,            // duplicate in nested object
+		`{"arr":[{"k":1}],"k":1,"k":2}`, // duplicate at top level after array/object values
+	}
+	for _, in := range cases {
+		_, err := FromJSON([]byte(in))
+		if err == nil {
+			t.Errorf("FromJSON(%q): expected ErrDuplicateKey, got nil", in)
+			continue
+		}
+		if !errors.Is(err, ErrDuplicateKey) {
+			t.Errorf("FromJSON(%q): expected ErrDuplicateKey, got: %v", in, err)
+		}
+	}
+}
+
+func TestDuplicateKeyDoesNotFalsePositive(t *testing.T) {
+	// Same key name in *sibling* objects (different nesting scopes) is
+	// NOT a duplicate and must canonicalize normally.
+	cases := []struct {
+		in, want string
+	}{
+		{`[{"a":1},{"a":2}]`, `[{"a":1},{"a":2}]`},
+		{`{"x":{"a":1},"y":{"a":2}}`, `{"x":{"a":1},"y":{"a":2}}`},
+		{`{"a":{"a":1}}`, `{"a":{"a":1}}`}, // key repeated across nesting levels
+	}
+	for _, c := range cases {
+		got, err := FromJSON([]byte(c.in))
+		if err != nil {
+			t.Errorf("FromJSON(%q): unexpected error: %v", c.in, err)
+			continue
+		}
+		if string(got) != c.want {
+			t.Errorf("FromJSON(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDuplicateKeyGuardLeavesValidBytesUnchanged is the regression lock
+// for the canonical-form invariant: adding duplicate-key rejection must
+// not alter the canonical bytes of any valid (duplicate-free) input.
+func TestDuplicateKeyGuardLeavesValidBytesUnchanged(t *testing.T) {
+	in := `{"z":[1,{"b":2,"a":3}],"x":"é","n":9007199254740992}`
+	want := `{"n":9007199254740992,"x":"é","z":[1,{"a":3,"b":2}]}`
+	got, err := FromJSON([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
 	}
 }
 

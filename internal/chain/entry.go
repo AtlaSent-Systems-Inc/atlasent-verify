@@ -42,7 +42,7 @@ type Entry struct {
 	PreviousHash  string          `json:"previous_hash"`
 	EntryHash     string          `json:"entry_hash"`
 	KeyVersion    string          `json:"key_version"`
-	Signature     string          `json:"signature"` // base64-std
+	Signature     string          `json:"signature"` // "ed25519:<base64url>" (v5) or plain base64 (legacy); see decodeSignature
 }
 
 // KeyStore is the verifier-side public-key surface. The CLI's PEM
