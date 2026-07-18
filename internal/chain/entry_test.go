@@ -191,6 +191,128 @@ func TestVerifyDetectsBadSignature(t *testing.T) {
 	}
 }
 
+// TestSignatureCountersAllVerified confirms that a fully-signed chain
+// verified against a known key reports SignaturesVerified == entries and
+// SignaturesSkipped == 0, and that the strict-acceptance contract accepts it.
+func TestSignatureCountersAllVerified(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+	prev := mustEntryHash(t, e1)
+	e2 := buildEntry(t, prev, 2, sk, map[string]any{"k": "v2"})
+	chain := bytes.Join([][]byte{e1, e2}, []byte{'\n'})
+
+	res, err := Verify(bytes.NewReader(chain), memKeys{pk: pk})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if res.SignaturesVerified != 2 {
+		t.Errorf("SignaturesVerified=%d, want 2", res.SignaturesVerified)
+	}
+	if res.SignaturesSkipped != 0 {
+		t.Errorf("SignaturesSkipped=%d, want 0", res.SignaturesSkipped)
+	}
+	ok, reason := res.StrictSignatureAcceptance(true)
+	if !ok {
+		t.Errorf("StrictSignatureAcceptance rejected a fully-verified chain: %s", reason)
+	}
+}
+
+// TestStrictAcceptanceRejectsSkippedSignature is the core acceptance-weakness
+// fix: when --keys is supplied but the chain's key_version is absent from the
+// keystore, the signature is SKIPPED. Hash continuity still passes (0
+// findings, a bare exit-0), but the strict contract must REJECT it because no
+// signature was actually verified — "exit 0" alone is not pilot evidence.
+func TestStrictAcceptanceRejectsSkippedSignature(t *testing.T) {
+	_, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// keystore only knows "k1"; the entry below uses "future-v99".
+	pkOther, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	raw := map[string]any{
+		"chain_version": json.Number("5"),
+		"org_id":        "org-1",
+		"sequence":      json.Number("1"),
+		"event_type":    "test.event",
+		"actor_id":      "actor-1",
+		"payload":       map[string]any{"k": "v1"},
+		"previous_hash": hex.EncodeToString(zeros),
+		"key_version":   "future-v99",
+	}
+	canonBytes, err := canonical.Bytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	h.Write(zeros)
+	h.Write(canonBytes)
+	hash := h.Sum(nil)
+	raw["entry_hash"] = hex.EncodeToString(hash)
+	raw["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(sk, hash))
+	line, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(bytes.NewReader(line), memKeys{pk: pkOther})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hash chain is intact — a bare run is green.
+	if len(res.Findings) != 0 {
+		t.Fatalf("expected 0 integrity findings (hash intact), got: %+v", res.Findings)
+	}
+	if res.SignaturesVerified != 0 || res.SignaturesSkipped != 1 {
+		t.Fatalf("verified=%d skipped=%d, want verified=0 skipped=1", res.SignaturesVerified, res.SignaturesSkipped)
+	}
+	// Strict acceptance must reject it and say WHY (skipped signature).
+	ok, reason := res.StrictSignatureAcceptance(true)
+	if ok {
+		t.Fatal("strict acceptance MUST reject a chain whose signatures were all skipped")
+	}
+	if !strings.Contains(reason, "SKIPPED") {
+		t.Errorf("reason should name the skipped signature; got %q", reason)
+	}
+}
+
+// TestStrictAcceptanceRejectsNoKeys: without a keystore, nothing could have
+// been verified, so strict acceptance must fail regardless of hash results.
+func TestStrictAcceptanceRejectsNoKeys(t *testing.T) {
+	_, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+	res, err := Verify(bytes.NewReader(e1), nil) // no keystore
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := res.StrictSignatureAcceptance(false); ok {
+		t.Errorf("strict acceptance must fail with no keys; got ok (reason=%q)", reason)
+	}
+}
+
+// TestStrictAcceptanceRejectsEmptyChain: an empty chain verified zero
+// signatures, so there is nothing to accept.
+func TestStrictAcceptanceRejectsEmptyChain(t *testing.T) {
+	res, err := Verify(bytes.NewReader([]byte("")), memKeys{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := res.StrictSignatureAcceptance(true); ok {
+		t.Errorf("strict acceptance must fail on an empty chain; got ok (reason=%q)", reason)
+	}
+}
+
 func mustEntryHash(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var m map[string]any

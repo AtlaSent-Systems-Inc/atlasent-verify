@@ -23,6 +23,7 @@ func main() {
 	chainPath := flag.String("chain", "", "Path to NDJSON chain export (required, '-' for stdin)")
 	keysPath := flag.String("keys", "", "Path to PEM file of Ed25519 public keys (optional; signature verification skipped if absent)")
 	headPath := flag.String("head", "", "Path to a trusted head-anchor JSON file (optional; tail-truncation / completeness check skipped if absent)")
+	requireSigs := flag.Bool("require-signatures", false, "Strict acceptance: fail (exit 1) unless EVERY entry's signature was verified against a known key. Requires --keys. Turns a skipped signature (unknown key_version) into a failure instead of a warning, so exit 0 positively proves the correct key was loaded and no signature was skipped.")
 	showVer := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -48,6 +49,11 @@ func main() {
 		}
 		defer f.Close()
 		r = f
+	}
+
+	if *requireSigs && *keysPath == "" {
+		fmt.Fprintln(os.Stderr, "error: --require-signatures requires --keys (there is nothing to verify signatures against)")
+		os.Exit(2)
 	}
 
 	var ks chain.KeyStore
@@ -104,6 +110,28 @@ func main() {
 		}
 		if ks == nil {
 			fmt.Fprintln(os.Stderr, "note: --keys not supplied; signature verification was skipped")
+		} else {
+			// Report signature coverage explicitly so a green run is
+			// self-describing: how many signatures were actually checked,
+			// and how many were skipped because their key was not loaded.
+			fmt.Fprintf(os.Stdout, "ok: %d signature(s) verified", res.SignaturesVerified)
+			if res.SignaturesSkipped > 0 {
+				fmt.Fprintf(os.Stdout, ", %d skipped (key_version not in keystore)", res.SignaturesSkipped)
+			}
+			fmt.Fprintln(os.Stdout)
+		}
+
+		// Strict acceptance: exit-0 must positively prove every entry was
+		// signature-verified against a known key. A chain that verified on
+		// hash continuity alone but skipped every signature is NOT pilot
+		// evidence and fails here.
+		if *requireSigs {
+			ok, reason := res.StrictSignatureAcceptance(ks != nil)
+			if !ok {
+				fmt.Fprintf(os.Stdout, "NOT ACCEPTED (--require-signatures): %s\n", reason)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stdout, "ACCEPTED (--require-signatures): %s\n", reason)
 		}
 		return
 	}

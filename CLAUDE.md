@@ -33,6 +33,11 @@ go build -o atlasent-audit-verify ./cmd/atlasent-audit-verify
 # Verify a chain export with signature checking
 atlasent-audit-verify --chain chain.ndjson --keys keys.pem
 
+# Strict acceptance (pilot evidence): fail unless EVERY entry's signature was
+# verified against a known key. A skipped signature (unknown key_version)
+# becomes a failure, so exit 0 positively proves the correct key was loaded.
+atlasent-audit-verify --chain chain.ndjson --keys keys.pem --require-signatures
+
 # Also check completeness against a trusted head anchor
 atlasent-audit-verify --chain chain.ndjson --keys keys.pem --head head.json
 
@@ -92,6 +97,27 @@ the signature check is skipped for that entry. This allows operators to verify
 chains that span key rotations when they only have the current key, without
 causing a false-positive integrity failure.
 
+### `--require-signatures` (strict acceptance) — exit 0 must MEAN "signatures verified"
+
+The default warn-on-skip behaviour has a trap for acceptance evidence: run with
+`--keys keys.pem` where `keys.pem` does **not** contain the exported chain's
+`key_version`, and *every* signature is silently skipped — yet the run still
+exits 0 on hash continuity alone. A bare exit 0 is therefore **not** proof that
+signatures were verified.
+
+`--require-signatures` closes this. It requires `--keys`, and turns a skipped
+signature into a **failure** (exit 1). On success it prints a positive
+`ACCEPTED` line stating how many signatures were verified and that zero were
+skipped. Use it whenever the verifier output is being preserved as pilot /
+acceptance evidence — it guarantees the correct verification key was loaded and
+every entry was actually signature-checked. Every run (strict or not) now also
+prints a `signature(s) verified` coverage line when `--keys` is supplied, so a
+green run is self-describing.
+
+The counts backing this live on `chain.Result` (`SignaturesVerified` /
+`SignaturesSkipped`) with the pure contract helper
+`Result.StrictSignatureAcceptance(keysSupplied bool)`.
+
 ### engine_version — ADDITIVE METADATA, NOT in the chain hash
 
 **INVARIANT: `engine_version` is NOT included in the chain hash.**
@@ -133,7 +159,9 @@ internal/keys/               PEM keystore (kid → ed25519.PublicKey)
   bump. Do not edit golden test values to fix a failing test; fix the canonicalizer.
 - **Fail findings only, warn for recoverable** — unknown `key_version` is a warning
   (printed to stderr, exit 0). Hash mismatches, chain breaks, and signature failures
-  against known keys are findings (exit 1).
+  against known keys are findings (exit 1). **Exception:** under `--require-signatures`
+  a skipped signature (unknown `key_version`) is promoted to a failure (exit 1) — see
+  the strict-acceptance section above.
 - **Backwards compatible** — the verifier accepts both the v5 prefixed `"ed25519:<base64url>"`
   signature format and the legacy plain base64 format.
 
