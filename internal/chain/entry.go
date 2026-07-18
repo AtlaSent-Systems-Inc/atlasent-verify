@@ -74,9 +74,52 @@ type Finding struct {
 type Result struct {
 	EntriesScanned int
 	Findings       []Finding
-	Warnings       []Finding         // non-fatal; signature skipped for unknown key_version
-	HeadByOrg      map[string]int64  // org_id → last verified sequence
-	HeadHashByOrg  map[string]string // org_id → last verified entry_hash (lowercase hex)
+	Warnings       []Finding // non-fatal; signature skipped for unknown key_version
+	// SignaturesVerified counts entries whose Ed25519 signature was
+	// checked against a known key AND passed. SignaturesSkipped counts
+	// entries whose signature could NOT be checked because their
+	// key_version was absent from the supplied keystore (the "unknown
+	// key_version" warning path). Both are only meaningful when a
+	// keystore was supplied. They exist so a caller can positively
+	// assert "every entry was signature-verified, none skipped" — the
+	// acceptance contract for pilot evidence, where a bare exit-0 that
+	// silently skipped every signature is NOT proof. See
+	// StrictSignatureAcceptance.
+	SignaturesVerified int
+	SignaturesSkipped  int
+	HeadByOrg          map[string]int64  // org_id → last verified sequence
+	HeadHashByOrg      map[string]string // org_id → last verified entry_hash (lowercase hex)
+}
+
+// StrictSignatureAcceptance evaluates whether this Result is acceptable as
+// signature-verified pilot evidence: a chain where EVERY entry's Ed25519
+// signature was actually checked against a known key and passed.
+//
+// It exists because a bare exit-0 from the verifier is NOT proof that
+// signatures were verified — with --keys supplied but the exported chain's
+// key_version absent from the keystore, every signature is silently skipped
+// (an "unknown key_version" warning) and the run still succeeds on hash
+// continuity alone. Pilot acceptance must positively prove the correct key
+// was loaded and no signature was skipped.
+//
+// keysSupplied reports whether a keystore was given to Verify at all;
+// without one, no signature could have been checked. The contract fails
+// unless: a keystore was supplied, there are zero integrity findings, zero
+// signatures were skipped, and at least one signature was verified.
+func (r *Result) StrictSignatureAcceptance(keysSupplied bool) (ok bool, reason string) {
+	if !keysSupplied {
+		return false, "no --keys supplied; no signature could be verified"
+	}
+	if len(r.Findings) > 0 {
+		return false, fmt.Sprintf("%d integrity finding(s) present", len(r.Findings))
+	}
+	if r.SignaturesSkipped > 0 {
+		return false, fmt.Sprintf("%d entr(ies) had signature verification SKIPPED (key_version not in keystore) — the correct verification key was not loaded", r.SignaturesSkipped)
+	}
+	if r.SignaturesVerified == 0 {
+		return false, "no signatures were verified (empty chain, or no signed entries)"
+	}
+	return true, fmt.Sprintf("%d/%d entr(ies) signature-verified against a known key, 0 skipped", r.SignaturesVerified, r.EntriesScanned)
 }
 
 // Verify reads an NDJSON chain export from r and returns a Result.
@@ -210,6 +253,7 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 		if keys != nil {
 			pk, ok := keys.PublicKey(e.KeyVersion)
 			if !ok {
+				res.SignaturesSkipped++
 				res.Warnings = append(res.Warnings, Finding{
 					LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
 					Kind:   "unknown_key_version",
@@ -234,6 +278,7 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 					})
 					continue
 				}
+				res.SignaturesVerified++
 			}
 		}
 
