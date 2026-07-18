@@ -313,6 +313,53 @@ func TestStrictAcceptanceRejectsEmptyChain(t *testing.T) {
 	}
 }
 
+// TestVerifyDetectsMalformedSignature: a syntactically invalid signature
+// string (not decodable as base64url or standard-base64) is a hard finding
+// (signature_decode), not a warning. The signature is excluded from the chain
+// hash, so hash continuity still passes — only the signature bytes are corrupt.
+// This closes the decode-error branch, which previously had no regression test.
+func TestVerifyDetectsMalformedSignature(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+
+	// Swap the signature for a non-decodable value. entry_hash stays valid
+	// because signature is stripped before canonicalization.
+	var m map[string]any
+	if err := json.Unmarshal(e1, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["signature"] = "ed25519:@@@not-base64@@@"
+	e1Bad, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(bytes.NewReader(e1Bad), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.Kind == "signature_decode" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected signature_decode finding for malformed signature, got: %+v", res.Findings)
+	}
+	if res.SignaturesVerified != 0 {
+		t.Errorf("SignaturesVerified=%d, want 0", res.SignaturesVerified)
+	}
+	// Strict acceptance must reject a chain carrying a decode finding.
+	if ok, _ := res.StrictSignatureAcceptance(true); ok {
+		t.Error("strict acceptance must reject a chain with a malformed signature")
+	}
+}
+
 func mustEntryHash(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var m map[string]any
