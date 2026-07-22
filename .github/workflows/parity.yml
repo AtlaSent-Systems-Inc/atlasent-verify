@@ -1,0 +1,121 @@
+name: parity
+
+# Offline-verifier parity gate. Continuously proves that an AtlaSent
+# audit-chain export in canonical v5 form verifies cleanly under the
+# standalone `atlasent-audit-verify` CLI with strict signature
+# acceptance and completeness checking.
+#
+# Closes pilot blocker B2 / SOC2 GAP-030 ("no CI job proves
+# service-output ⇄ CLI parity"): before this workflow, nothing in CI
+# ran the CLI against a committed, signed, service-shaped export and
+# asserted a strict-acceptance exit 0.
+#
+# The fixture (testdata/parity/) is SYNTHETIC and DETERMINISTIC — a
+# self-consistent v5 export produced by the repo's own canonicalizer
+# (internal/canonical) and signed with an in-source throwaway Ed25519
+# key (NOT a production key, NOT a real tenant export). It locks the
+# canonical-form ⇄ CLI contract. What it does NOT establish — that the
+# RUNTIME service emits byte-identical canonical form signed by the
+# real R3 audit key — is an operator step against staging, documented
+# in testdata/parity/README.md.
+#
+# Sibling to reproducibility.yml (build determinism) and canary.yml
+# (trust-chain freshness); this one guards output-format parity.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: '1.24'
+  FIXTURE_DIR: testdata/parity
+
+jobs:
+  parity:
+    name: service-export ⇄ CLI parity (strict signatures + completeness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.mod
+
+      # Build the CLI exactly as an operator would (plain build; the
+      # release flags are exercised separately by reproducibility.yml).
+      - name: Build atlasent-audit-verify
+        run: |
+          go build -o /tmp/atlasent-audit-verify ./cmd/atlasent-audit-verify
+          /tmp/atlasent-audit-verify --version
+
+      # The core parity assertion. --require-signatures makes exit 0
+      # positively mean "every entry signature-verified against a known
+      # key, zero skipped" — a bare exit 0 (hash continuity only) is NOT
+      # acceptance evidence. --head adds the anti-truncation completeness
+      # check against the trusted anchor.
+      - name: Verify committed fixture (strict acceptance + head anchor)
+        id: verify
+        run: |
+          set -o pipefail
+          /tmp/atlasent-audit-verify \
+            --chain "${FIXTURE_DIR}/chain.ndjson" \
+            --keys  "${FIXTURE_DIR}/keys.pem" \
+            --head  "${FIXTURE_DIR}/head.json" \
+            --require-signatures \
+            2>&1 | tee /tmp/parity-output.txt
+          echo "::notice::CLI exited 0 under --require-signatures (parity OK)"
+
+      # Belt-and-suspenders: assert the positive evidence lines are
+      # present and that no signature was skipped. Under
+      # --require-signatures a skip already forces exit 1, but these
+      # explicit checks make the job self-documenting and immune to a
+      # future change to the strict-mode exit contract.
+      - name: Assert strict-acceptance evidence lines
+        run: |
+          out=/tmp/parity-output.txt
+
+          grep -qF 'ACCEPTED (--require-signatures)' "$out" \
+            || { echo "::error::missing ACCEPTED line — not strict-accepted evidence"; exit 1; }
+
+          grep -qF 'signature(s) verified' "$out" \
+            || { echo "::error::missing signature-coverage line"; exit 1; }
+
+          grep -qF 'no tail truncation' "$out" \
+            || { echo "::error::completeness/anti-truncation check did not run or did not pass"; exit 1; }
+
+          # The real skip indicator is the "(key_version not in keystore)"
+          # suffix. Its presence means a signature was skipped — a
+          # false-green risk this job exists to prevent. (The ACCEPTED
+          # line legitimately contains the substring "0 skipped", so we
+          # do NOT grep for a bare "skipped".)
+          if grep -qF 'key_version not in keystore' "$out"; then
+            echo "::error::a signature was SKIPPED (unknown key_version) — the correct key was not loaded"
+            exit 1
+          fi
+
+          echo "::notice::Parity evidence verified: signatures verified, zero skipped, no truncation."
+
+      # Also run the in-repo parity unit test, so the same assertion is
+      # exercised by `go test ./...` (and therefore by ci.yml and the
+      # weekly canary) — not only by this workflow.
+      - name: Run parity unit test
+        run: go test -race -count=1 -run 'Parity' ./cmd/atlasent-audit-verify
+
+      - name: Upload parity evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: parity-evidence-${{ github.run_id }}
+          path: /tmp/parity-output.txt
+          retention-days: 90
