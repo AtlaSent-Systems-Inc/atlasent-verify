@@ -5,6 +5,8 @@
 *.sig
 *.pem
 !internal/**/*.pem
+# Committed offline-verifier parity fixture (PUBLIC key only — see testdata/parity/README.md)
+!testdata/parity/*.pem
 
 # Go
 *.test
