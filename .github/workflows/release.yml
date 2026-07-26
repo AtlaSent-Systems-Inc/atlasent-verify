@@ -43,8 +43,9 @@ on:
         required: true
 
 permissions:
-  contents: write     # to create the GitHub Release + upload assets
-  id-token: write     # to obtain the OIDC token for Sigstore keyless signing
+  contents: write       # to create the GitHub Release + upload assets
+  id-token: write       # to obtain the OIDC token for Sigstore keyless signing
+  attestations: write   # to record GitHub build-provenance attestations (SLSA)
 
 env:
   GO_VERSION: '1.24'
@@ -189,35 +190,99 @@ jobs:
             --output-certificate CHECKSUMS.txt.pem \
             CHECKSUMS.txt
 
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/atlasent-audit-verify-${{ steps.version.outputs.label }}.sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Sign SBOM (keyless OIDC)
+        working-directory: dist
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          sbom="atlasent-audit-verify-${{ steps.version.outputs.label }}.sbom.cdx.json"
+          cosign sign-blob \
+            --output-signature "$sbom.sig" \
+            --output-certificate "$sbom.pem" \
+            "$sbom"
+
+      - name: Attest build provenance (SLSA)
+        # GitHub-native build provenance for each released binary. Records a
+        # signed attestation in the repo's attestation store; verifiable with:
+        #   gh attestation verify <binary> --repo AtlaSent-Systems-Inc/atlasent-verify
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/atlasent-audit-verify-*-linux-amd64
+            dist/atlasent-audit-verify-*-linux-arm64
+            dist/atlasent-audit-verify-*-darwin-amd64
+            dist/atlasent-audit-verify-*-darwin-arm64
+            dist/atlasent-audit-verify-*-windows-amd64.exe
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: atlasent-audit-verify ${{ steps.version.outputs.label }}
           tag_name: ${{ github.ref_name }}
+          # RC / pre-release tags (anything with a hyphen, e.g. v0.1.0-rc.1) are
+          # published as pre-releases and are NOT marked "latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           body: |
-            External AtlaSent audit-chain verifier — ADR-020.
+            The **offline, source-open AtlaSent audit-chain verifier** (ADR-020).
+            Read-only: no network I/O, no database access, no developer tools or
+            repository checkout required — download the binary for your platform
+            and run it against an exported chain.
 
-            Each binary is signed with Sigstore Cosign (keyless OIDC).
-            Verify any artifact:
+            **Source commit:** `${{ github.sha }}`
+            **Canonical form supported:** audit chain v5.
+
+            ## Usage
+            ```
+            # verify a chain export (hash continuity + ordering + canonical form)
+            atlasent-audit-verify --chain chain.ndjson
+
+            # strict acceptance for evidence: fail unless EVERY entry's signature
+            # was verified against a known key (exit 0 proves 0 skipped)
+            atlasent-audit-verify --chain chain.ndjson --keys keys.pem --require-signatures
+            ```
+            Exit codes: `0` = valid, `1` = findings (integrity failures), `2` = environment error.
+
+            ## Verifying this download
+            Each artifact is signed with Sigstore Cosign (keyless OIDC) and covered
+            by a GitHub build-provenance attestation. A CycloneDX **SBOM** is
+            included (`*.sbom.cdx.json`, signed).
 
             ```
+            # 1) checksums
+            sha256sum -c CHECKSUMS.txt
+            # 2) Sigstore signature (per artifact, or the CHECKSUMS file once)
             cosign verify-blob \
               --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-verify/.*' \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              --signature <artifact>.sig \
-              --certificate <artifact>.pem \
-              <artifact>
+              --signature <artifact>.sig --certificate <artifact>.pem <artifact>
+            # 3) GitHub build provenance
+            gh attestation verify <artifact> --repo AtlaSent-Systems-Inc/atlasent-verify
             ```
+            Builds are byte-for-byte reproducible (verified on every PR by the
+            reproducibility workflow).
 
-            Or verify the aggregate checksum file (`CHECKSUMS.txt.sig` + `.pem`)
-            once, then `sha256sum -c CHECKSUMS.txt` for each artifact you
-            downloaded.
+            ## Windows note (transparency)
+            The Windows `.exe` is **not** Authenticode code-signed (AtlaSent has no
+            code-signing certificate for this initial release), so Windows SmartScreen
+            may show an "unrecognized app" warning on first run. Its integrity is
+            instead provable via the SHA-256 checksum, the Sigstore signature, and
+            the GitHub provenance attestation above. A future release may add
+            Authenticode signing.
 
-            Build reproducibility: byte-identical-builds are verified on
-            every PR by the reproducibility workflow.
-
-            Canonical-form version supported: chain v5
-            (atlasent-docs/architecture/specs/audit-chain-canonical-form.md).
+            ## License & security
+            License: see [`LICENSE`](https://github.com/AtlaSent-Systems-Inc/atlasent-verify/blob/main/LICENSE).
+            Report a vulnerability: [Security policy](https://github.com/AtlaSent-Systems-Inc/atlasent-verify/blob/main/SECURITY.md)
+            (private GitHub Security Advisories).
           fail_on_unmatched_files: true
           files: |
             dist/atlasent-audit-verify-*
