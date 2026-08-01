@@ -24,6 +24,82 @@ records. It accepts a newline-delimited JSON (NDJSON) chain export and verifies:
 The verifier is source-open so it can be audited by a customer or auditor without an
 NDA. Its releases are reproducibly built and Sigstore-signed.
 
+## Two input shapes: NDJSON chain vs signed export ENVELOPE
+
+The CLI accepts two shapes and **auto-detects** between them (an envelope is a
+single JSON object carrying `public_key_pem`/`evaluations` and no
+`chain_version`/`entry_hash`; anything else is treated as NDJSON):
+
+1. **NDJSON audit chain** — the per-row hash-chain + Ed25519 verification above.
+2. **Signed export ENVELOPE** — the `v1-export-audit` bundle: one JSON object
+   with record arrays (`evaluations`, `verification_events`,
+   `correlation_events`, …), a `key_id`, an embedded `public_key_pem`, and an
+   **outer** Ed25519 signature over `jcs.Canonicalize(envelope-minus-signature)`.
+   The non-`evaluations` arrays ride that outer signature; they are **not**
+   folded into the per-row `entry_hash` chain (ADR-020 offline-verifier parity;
+   ADR-048 single evidence ledger).
+
+### Envelope verification is 3 independent layers
+
+`internal/envelope` produces a `VerificationResult` with three verdicts —
+`envelope_integrity`, `ledger_integrity`, `correlation_integrity` — each
+`valid` / `invalid` / `absent` (`valid_untrusted_key` for the envelope layer
+when the outer signature verifies only against the envelope's **embedded**
+`public_key_pem`, i.e. trust is not externally anchored via `--keys`).
+
+- **Envelope** — the outer Ed25519 signature (standard base64, distinct from
+  the NDJSON per-row `ed25519:<base64url>`), verified against a **trusted** key
+  resolved from `--keys` by `key_id`. Any tampering with any record (including a
+  correlation field) breaks this signature.
+- **Ledger** — the `evaluations[]` entry-hash chain: `entry_hash ==
+  sha256_hex(canonical_payload)` (the execution_evaluations scheme embeds
+  `prev_hash` as `canonical_payload`'s trailing field) plus prev_hash→entry_hash
+  continuity. Genesis is **not** asserted (an export is a window).
+- **Correlation** — semantic validation of `correlation_events[]` against the
+  **other records in the same signed envelope**. A correlation record is
+  verified only when its reference resolves in-export (by `permit_token_hash` /
+  `decision_id`), the lifecycle is permitted (permit → execution → observation →
+  correlation; a correlation for a non-`allow` Decision is contradictory), the
+  action/target bindings agree with the same-permit verification record, and
+  there is no duplicate/conflict. `correlation_protection` is always
+  `outer_envelope_signature`. Absence of correlation records is a SUCCESS
+  (`absent`), never an error.
+
+Machine-readable failure codes: `ENVELOPE_SIGNATURE_INVALID`,
+`UNSUPPORTED_ENVELOPE_VERSION`, `LEDGER_HASH_MISMATCH`, `LEDGER_CHAIN_BROKEN`,
+`CORRELATION_REFERENCE_MISSING`, `CORRELATION_REFERENCE_OUTSIDE_EXPORT`,
+`CORRELATION_ORG_MISMATCH`, `CORRELATION_ACTION_MISMATCH`,
+`CORRELATION_TARGET_MISMATCH`, `CORRELATION_LIFECYCLE_INVALID`,
+`CORRELATION_DUPLICATE`, `CORRELATION_CONFLICT`.
+
+**Org binding honesty:** the current export projections carry no per-record
+`organization_id`, so within a single re-signed envelope there is no field to
+bind a record to an org. This is reported as `org_binding:
+not_present_in_export` (not a false pass); the check activates automatically
+once the producer surfaces `organization_id` on the correlation / evaluation
+projections.
+
+### JCS canonicalization (`internal/jcs`)
+
+The outer signature is computed over RFC 8785 JCS bytes. `internal/jcs`
+reproduces `atlasent-api/supabase/functions/_shared/canonical.ts`
+**byte-for-byte** (sorted UTF-16 keys at all depths, JSON.stringify string
+escaping, ECMAScript `Number::toString` for numbers) — verified against the
+real producer over a parity-vector suite. This is a distinct canonical form
+from `internal/canonical` (the per-row audit-chain pipe form).
+
+```bash
+# Verify a signed export envelope against a trusted R3 audit-export key
+atlasent-audit-verify --chain export.json --keys keys.pem
+
+# Strict acceptance: require the outer signature to verify against a TRUSTED
+# key (not merely the envelope's embedded public_key_pem)
+atlasent-audit-verify --chain export.json --keys keys.pem --require-signatures
+
+# Machine-readable result
+atlasent-audit-verify --chain export.json --keys keys.pem --json
+```
+
 ## How to run the verifier
 
 ```bash
