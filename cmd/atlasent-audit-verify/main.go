@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/atlasent-systems-inc/atlasent-verify/internal/chain"
 	"github.com/atlasent-systems-inc/atlasent-verify/internal/keys"
@@ -121,6 +123,11 @@ func main() {
 			fmt.Fprintln(os.Stdout)
 		}
 
+		// CCAM stage summary — which stages of the Decision → Verification →
+		// Correlation evidence chain this export carries. Descriptive; the
+		// integrity guarantee is the verified/ok lines above.
+		printStageSummary(os.Stdout, res)
+
 		// Strict acceptance: exit-0 must positively prove every entry was
 		// signature-verified against a known key. A chain that verified on
 		// hash continuity alone but skipped every signature is NOT pilot
@@ -143,4 +150,64 @@ func main() {
 	fmt.Fprintf(os.Stderr, "\nfound %d issue(s) across %d entries scanned\n",
 		len(res.Findings), res.EntriesScanned)
 	os.Exit(1)
+}
+
+// ccamStages maps CCAM evidence-chain stages to the audit event_type that
+// records them, in Decision → Verification → Correlation order. Only stages
+// actually present in the chain are printed.
+var ccamStages = []struct {
+	label     string
+	eventType string
+}{
+	{"decision", "evaluation.completed"},
+	{"verification", "execution.receipt"},
+	{"correlation", "execution.correlated"},
+}
+
+// printStageSummary prints a human-readable CCAM stage summary: which stages of
+// the Decision → Verification → Correlation evidence chain are present, with a
+// per-status breakdown for the correlation (ADR-048 Evidence) stage. It is
+// descriptive — the cryptographic guarantee is the verified/ok lines the caller
+// already printed; a MISMATCH / bypass correlation was already emitted as a
+// warning by the verify loop, so it is only annotated here.
+func printStageSummary(w io.Writer, res *chain.Result) {
+	if len(res.EventTypeCounts) == 0 {
+		return
+	}
+	printed := false
+	for _, s := range ccamStages {
+		n := res.EventTypeCounts[s.eventType]
+		if n == 0 {
+			continue
+		}
+		if !printed {
+			fmt.Fprintln(w, "CCAM stages present:")
+			printed = true
+		}
+		line := fmt.Sprintf("  %-13s ✓  %d %s", s.label, n, s.eventType)
+		if s.eventType == "execution.correlated" {
+			if bd := correlationBreakdown(res); bd != "" {
+				line += " (" + bd + ")"
+			}
+		}
+		fmt.Fprintln(w, line)
+	}
+}
+
+// correlationBreakdown renders the per-status tally of execution.correlated
+// entries in a deterministic (sorted) order, e.g. "3 MATCH, 1 NOT_OBSERVED".
+func correlationBreakdown(res *chain.Result) string {
+	if len(res.CorrelationByStatus) == 0 {
+		return ""
+	}
+	statuses := make([]string, 0, len(res.CorrelationByStatus))
+	for st := range res.CorrelationByStatus {
+		statuses = append(statuses, st)
+	}
+	sort.Strings(statuses)
+	parts := make([]string, 0, len(statuses))
+	for _, st := range statuses {
+		parts = append(parts, fmt.Sprintf("%d %s", res.CorrelationByStatus[st], st))
+	}
+	return strings.Join(parts, ", ")
 }

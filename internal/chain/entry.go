@@ -89,6 +89,18 @@ type Result struct {
 	SignaturesSkipped  int
 	HeadByOrg          map[string]int64  // org_id → last verified sequence
 	HeadHashByOrg      map[string]string // org_id → last verified entry_hash (lowercase hex)
+
+	// EventTypeCounts tallies every entry by its event_type, so the CLI can
+	// print a CCAM stage summary (decision / verification / correlation). It
+	// describes what the chain contains; it is NOT an integrity assertion.
+	EventTypeCounts map[string]int64
+	// CorrelationByStatus tallies `execution.correlated` entries (ADR-048
+	// Evidence stage) by their recorded correlation_status
+	// (MATCH/MISMATCH/UNCERTAIN/NOT_OBSERVED). A MISMATCH or a bypass_detected
+	// entry is ALSO surfaced as a Warning: the chain is intact (the divergence
+	// is legitimately recorded evidence), but the substantive signal is not
+	// swallowed by a green run.
+	CorrelationByStatus map[string]int64
 }
 
 // StrictSignatureAcceptance evaluates whether this Result is acceptable as
@@ -126,7 +138,12 @@ func (r *Result) StrictSignatureAcceptance(keysSupplied bool) (ok bool, reason s
 // Verification is best-effort: it does not stop at the first
 // finding, so callers can see the full picture.
 func Verify(r io.Reader, keys KeyStore) (*Result, error) {
-	res := &Result{HeadByOrg: map[string]int64{}, HeadHashByOrg: map[string]string{}}
+	res := &Result{
+		HeadByOrg:           map[string]int64{},
+		HeadHashByOrg:       map[string]string{},
+		EventTypeCounts:     map[string]int64{},
+		CorrelationByStatus: map[string]int64{},
+	}
 	sc := bufio.NewScanner(r)
 	// Allow large lines: payloads can be tens of KB.
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -155,6 +172,37 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 			continue
 		}
 		res.EntriesScanned++
+
+		// CCAM stage summary (descriptive, not an integrity assertion): tally
+		// every well-formed entry by event_type, and for the ADR-048 Evidence
+		// stage (`execution.correlated`) record the verdict + surface a
+		// divergence (MISMATCH / bypass_detected) as a Warning. The chain hash
+		// is unaffected — a bad correlation is legitimately recorded evidence,
+		// not a chain break.
+		if e.EventType != "" {
+			res.EventTypeCounts[e.EventType]++
+		}
+		if e.EventType == "execution.correlated" {
+			var cp struct {
+				CorrelationStatus string `json:"correlation_status"`
+				BypassDetected    bool   `json:"bypass_detected"`
+			}
+			_ = json.Unmarshal(e.Payload, &cp)
+			if cp.CorrelationStatus != "" {
+				res.CorrelationByStatus[cp.CorrelationStatus]++
+			}
+			if cp.CorrelationStatus == "MISMATCH" || cp.BypassDetected {
+				detail := fmt.Sprintf("execution.correlated recorded %s", cp.CorrelationStatus)
+				if cp.BypassDetected {
+					detail += " (bypass_detected)"
+				}
+				res.Warnings = append(res.Warnings, Finding{
+					LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
+					Kind:   "correlation_divergence",
+					Detail: detail,
+				})
+			}
+		}
 
 		// Chain version
 		if e.ChainVersion < MinChainVersion {

@@ -550,3 +550,101 @@ func TestVerifyUnknownKeyVersionWarns(t *testing.T) {
 		t.Errorf("HeadByOrg[org-1]=%d, want 1", res.HeadByOrg["org-1"])
 	}
 }
+
+// buildEntryTyped is buildEntry with a caller-chosen event_type — used to
+// exercise the CCAM stage summary (decision / verification / correlation).
+func buildEntryTyped(t *testing.T, prevHash []byte, seq int64, sk ed25519.PrivateKey, eventType string, payload map[string]any) []byte {
+	t.Helper()
+	prevHex := hex.EncodeToString(prevHash)
+	entry := map[string]any{
+		"chain_version": json.Number("5"),
+		"org_id":        "org-1",
+		"sequence":      json.Number(itoa(seq)),
+		"event_type":    eventType,
+		"actor_id":      "actor-1",
+		"payload":       payload,
+		"previous_hash": prevHex,
+		"key_version":   "k1",
+	}
+	canonBytes, err := canonical.Bytes(entry)
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	h := sha256.New()
+	h.Write(prevHash)
+	h.Write(canonBytes)
+	hash := h.Sum(nil)
+	entry["entry_hash"] = hex.EncodeToString(hash)
+	entry["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(sk, hash))
+	out, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return out
+}
+
+// TestVerifyStageSummary proves the CCAM stage tallies + correlation breakdown,
+// and that a MISMATCH / bypass_detected correlation is surfaced as a WARNING
+// (never an integrity finding — the chain stays valid). Note: `confidence` is a
+// STRING in the payload, per the canonical-form non-integer-scalar rule; a float
+// would be rejected by the canonicalizer.
+func TestVerifyStageSummary(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+
+	e1 := buildEntryTyped(t, zeros, 1, sk, "evaluation.completed", map[string]any{"decision": "allow"})
+	prev := mustEntryHash(t, e1)
+	e2 := buildEntryTyped(t, prev, 2, sk, "execution.receipt", map[string]any{"permit_id": "pt.v3.x"})
+	prev = mustEntryHash(t, e2)
+	e3 := buildEntryTyped(t, prev, 3, sk, "execution.correlated", map[string]any{
+		"correlation_status": "MATCH", "confidence": "0.99", "bypass_detected": false,
+	})
+	prev = mustEntryHash(t, e3)
+	e4 := buildEntryTyped(t, prev, 4, sk, "execution.correlated", map[string]any{
+		"correlation_status": "MISMATCH", "confidence": "0.99", "bypass_detected": true,
+	})
+
+	var b bytes.Buffer
+	for i, e := range [][]byte{e1, e2, e3, e4} {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.Write(e)
+	}
+
+	res, err := Verify(bytes.NewReader(b.Bytes()), memKeys{pk: pk})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(res.Findings) != 0 {
+		t.Fatalf("expected 0 integrity findings, got %d: %+v", len(res.Findings), res.Findings)
+	}
+	if got := res.EventTypeCounts["evaluation.completed"]; got != 1 {
+		t.Errorf("evaluation.completed count = %d, want 1", got)
+	}
+	if got := res.EventTypeCounts["execution.receipt"]; got != 1 {
+		t.Errorf("execution.receipt count = %d, want 1", got)
+	}
+	if got := res.EventTypeCounts["execution.correlated"]; got != 2 {
+		t.Errorf("execution.correlated count = %d, want 2", got)
+	}
+	if got := res.CorrelationByStatus["MATCH"]; got != 1 {
+		t.Errorf("correlation MATCH count = %d, want 1", got)
+	}
+	if got := res.CorrelationByStatus["MISMATCH"]; got != 1 {
+		t.Errorf("correlation MISMATCH count = %d, want 1", got)
+	}
+	// The MISMATCH + bypass entry is surfaced as a warning, not a finding.
+	var found bool
+	for _, w := range res.Warnings {
+		if w.Kind == "correlation_divergence" && strings.Contains(w.Detail, "MISMATCH") && strings.Contains(w.Detail, "bypass_detected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a correlation_divergence warning for the MISMATCH/bypass entry; warnings=%+v", res.Warnings)
+	}
+}
