@@ -90,7 +90,7 @@ func TestCLIEnvelopeAutodetectAndVerify(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("want exit 0, got %d\n%s", code, out)
 	}
-	for _, want := range []string{"Envelope signature", "Ledger", "Correlation integrity", "1/1 record(s) verified", "outer_envelope_signature", "ok: audit export verified"} {
+	for _, want := range []string{"Envelope signature", "Ledger", "Correlation integrity", "1/1 record(s) verified", "outer_envelope_signature", "Permit", "Observation", "signed by the R3 outer envelope", "ok: audit export verified"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)
 		}
@@ -158,7 +158,10 @@ func TestCLIEnvelopeJSONOutput(t *testing.T) {
 	if err := dec.Decode(&res); err != nil {
 		t.Fatalf("output is not JSON: %v\n%s", err, out)
 	}
-	if res["envelope_integrity"] != "valid" || res["correlation_integrity"] != "valid" {
+	// Machine-readable contract: verdicts use the stable "verified" vocabulary.
+	if res["envelope_integrity"] != "verified" ||
+		res["ledger_integrity"] != "verified" ||
+		res["correlation_integrity"] != "verified" {
 		t.Errorf("json verdicts wrong: %v", res)
 	}
 	if res["correlation_protection"] != "outer_envelope_signature" {

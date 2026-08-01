@@ -72,6 +72,26 @@ const (
 	LayerUntrustedKey Layer = "valid_untrusted_key"
 )
 
+// MarshalJSON emits the stable wire vocabulary for a layer verdict:
+// "verified" / "invalid" / "absent" (+ "verified_untrusted_key" for the honest
+// un-anchored-trust state). This is the machine-readable contract consumers
+// branch on — deliberately distinct per layer so nobody can later claim the
+// correlation records participate in the per-row ledger chain when they do not.
+func (l Layer) MarshalJSON() ([]byte, error) {
+	switch l {
+	case LayerValid:
+		return []byte(`"verified"`), nil
+	case LayerUntrustedKey:
+		return []byte(`"verified_untrusted_key"`), nil
+	case LayerInvalid:
+		return []byte(`"invalid"`), nil
+	case LayerAbsent:
+		return []byte(`"absent"`), nil
+	default:
+		return []byte(`"unknown"`), nil
+	}
+}
+
 // Finding is one machine-readable verification failure.
 type Finding struct {
 	Code   FailureCode `json:"code"`
@@ -94,6 +114,24 @@ const (
 	OrgBindingNotInExport   OrgBinding = "not_present_in_export"
 	OrgBindingNotApplicable OrgBinding = "not_applicable" // no correlation records
 )
+
+// CorrelationStages tallies the CCAM lifecycle stages evidenced by the
+// VERIFIED correlation records (records that passed every semantic check).
+// These back the CLI's honest per-stage lines: a stage is shown only when
+// real records evidence it.
+type CorrelationStages struct {
+	// PermitResolved is the count of verified correlations that resolved to an
+	// issued Permit in-export (an allow-Decision and/or a permit-verification).
+	PermitResolved int `json:"permit_resolved"`
+	// Observed is the count of verified correlations whose observation
+	// actually saw the execution in the provider's log (correlation_status
+	// MATCH or MISMATCH — the collector observed an event).
+	Observed int `json:"observed"`
+	// NotObserved is the count of verified correlations reporting NOT_OBSERVED
+	// (the collector found no matching provider event). Surfaced honestly, not
+	// hidden — a NOT_OBSERVED correlation is valid evidence of a non-observation.
+	NotObserved int `json:"not_observed"`
+}
 
 // VerificationResult is the 3-layer result the user's spec calls for:
 // envelope integrity, ledger integrity, and correlation integrity — each an
@@ -127,6 +165,12 @@ type VerificationResult struct {
 	// LedgerEntriesVerified counts evaluation records whose hash chain + (when
 	// keys supplied) signature verified.
 	LedgerEntriesVerified int `json:"ledger_entries_verified"`
+
+	// Stages breaks the verified correlation records down by the CCAM
+	// lifecycle stage each one evidences, so the CLI can show Permit /
+	// Observation / Correlation honestly — a stage line is only ever backed by
+	// records that actually carry that stage's evidence, never a blanket green.
+	Stages CorrelationStages `json:"correlation_stages"`
 
 	// OrgBinding reports whether the correlation→decision org tie was
 	// checkable (see OrgBinding).
