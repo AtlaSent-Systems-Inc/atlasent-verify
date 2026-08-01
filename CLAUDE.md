@@ -42,10 +42,17 @@ single JSON object carrying `public_key_pem`/`evaluations` and no
 ### Envelope verification is 3 independent layers
 
 `internal/envelope` produces a `VerificationResult` with three verdicts —
-`envelope_integrity`, `ledger_integrity`, `correlation_integrity` — each
-`valid` / `invalid` / `absent` (`valid_untrusted_key` for the envelope layer
-when the outer signature verifies only against the envelope's **embedded**
-`public_key_pem`, i.e. trust is not externally anchored via `--keys`).
+`envelope_integrity`, `ledger_integrity`, `correlation_integrity`. The
+machine-readable (`--json`) wire vocabulary is `verified` / `invalid` /
+`absent` (plus `verified_untrusted_key` for the envelope layer when the outer
+signature verifies only against the envelope's **embedded** `public_key_pem`,
+i.e. trust is not externally anchored via `--keys`). `correlation_integrity`
+is `verified` only when the outer signature is valid **AND** every correlation
+reference is internally valid — never merely because the outer signature
+verified. A verified correlation layer additionally reports a per-stage
+`correlation_stages` tally (`permit_resolved` / `observed` / `not_observed`)
+that backs the CLI's honest Permit / Observation / Correlation lifecycle lines
+— a stage line is shown only when real records evidence it.
 
 - **Envelope** — the outer Ed25519 signature (standard base64, distinct from
   the NDJSON per-row `ed25519:<base64url>`), verified against a **trusted** key

@@ -166,6 +166,25 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 	}
 	fmt.Fprintln(os.Stdout)
 
+	// Honest CCAM lifecycle breakdown — shown ONLY when the correlation layer
+	// actually verified, and each stage line is backed by records that carry
+	// that stage's evidence. Never a blanket green just because the outer
+	// signature is valid.
+	if res.CorrelationIntegrity == envelope.LayerValid && res.CorrelationRecordsVerified > 0 {
+		st := res.Stages
+		fmt.Fprintf(os.Stdout, "    ├─ Permit       %s  %d/%d correlation(s) resolve to an issued permit\n",
+			stageMark(st.PermitResolved == res.CorrelationRecordsVerified), st.PermitResolved, res.CorrelationRecordsVerified)
+		if st.NotObserved > 0 {
+			fmt.Fprintf(os.Stdout, "    ├─ Observation  %s  %d observed, %d not-observed (collector found no provider event)\n",
+				stageMark(st.Observed > 0), st.Observed, st.NotObserved)
+		} else {
+			fmt.Fprintf(os.Stdout, "    ├─ Observation  %s  %d execution(s) observed in the provider log\n",
+				stageMark(st.Observed == res.CorrelationRecordsVerified), st.Observed)
+		}
+		fmt.Fprintf(os.Stdout, "    └─ Correlation  OK   %d record(s), signed by the R3 outer envelope\n",
+			res.CorrelationRecordsVerified)
+	}
+
 	for _, f := range res.Findings {
 		if f.Record != "" {
 			fmt.Fprintf(os.Stdout, "  ! %s [%s]: %s\n", f.Code, f.Record, f.Detail)
@@ -183,6 +202,16 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 	} else {
 		fmt.Fprintf(os.Stderr, "\nfound %d issue(s)\n", len(res.Findings))
 	}
+}
+
+// stageMark renders a lifecycle-stage marker. A stage is "OK" only when every
+// verified correlation evidences it; otherwise "~~" flags a partial stage
+// (surfaced, never hidden).
+func stageMark(full bool) string {
+	if full {
+		return "OK  "
+	}
+	return "~~  "
 }
 
 func trustLabel(trusted bool) string {

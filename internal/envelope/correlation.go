@@ -24,6 +24,10 @@ func validateCorrelations(env *Envelope, res *VerificationResult) (verified int,
 		return 0, OrgBindingNotApplicable
 	}
 
+	// Per-record lifecycle evidence, tallied only for records that survive
+	// every check (see the failed[] flags below).
+	resolvedPermit := make([]bool, len(env.Correlations))
+
 	// Index the Decision anchors (evaluations[]) by permit_token_hash. The
 	// evaluations rows are raw JSON (the ledger layer needs byte fidelity); we
 	// decode a lite view here for the reference/lifecycle checks.
@@ -103,6 +107,7 @@ func validateCorrelations(env *Envelope, res *VerificationResult) (verified int,
 					c.DecisionID, shortHash(c.PermitTokenHash)))
 			continue
 		}
+		resolvedPermit[i] = true // a Permit (Decision and/or verification) was resolved in-export
 
 		// (4-lifecycle) permit -> execution -> observation -> correlation.
 		// A correlation asserts an execution was observed. That is only
@@ -219,9 +224,20 @@ func validateCorrelations(env *Envelope, res *VerificationResult) (verified int,
 		res.AddFinding(code, correlationRecordRef(env.Correlations[idxs[0]]), detail)
 	}
 
-	for _, f := range failed {
-		if !f {
-			verified++
+	for i, f := range failed {
+		if f {
+			continue
+		}
+		verified++
+		// Lifecycle-stage tally, only for fully-verified records.
+		if resolvedPermit[i] {
+			res.Stages.PermitResolved++
+		}
+		switch strings.ToUpper(strings.TrimSpace(env.Correlations[i].CorrelationStatus)) {
+		case "MATCH", "MISMATCH":
+			res.Stages.Observed++
+		case "NOT_OBSERVED":
+			res.Stages.NotObserved++
 		}
 	}
 
