@@ -7,7 +7,7 @@ import (
 )
 
 // validateArchiveEvents semantically validates the Evidence Archive record
-// sections of a signed export bundle (ADR-064): governed archive DISCLOSURES
+// sections of a signed export bundle (ADR-065): governed archive DISCLOSURES
 // (`retrieval_events`) and read-assurance VERDICTS (`probe_events`).
 //
 // Same posture as validateCorrelations: the outer signature already proves the
