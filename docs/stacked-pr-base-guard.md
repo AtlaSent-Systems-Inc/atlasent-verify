@@ -10,14 +10,15 @@ PRs continued to merge into an intermediate branch that no longer delivered them
 
 ## Guard and algorithm
 
-`Stacked PR base guard` runs on PR metadata changes. It checks out the trusted copy
-of the guard from `main`, fetches every remote branch and queries all PR states. For
+`Stacked PR base guard` runs on PR metadata changes (including a parent's closure)
+and can be dispatched manually. It checks out the trusted copy of the guard from
+`main`, fetches every remote branch and queries all PR states. For
 a PR targeting `main`, it succeeds immediately. Otherwise it walks the route:
 
 1. the target remote ref must exist;
-2. its tip must not already be an ancestor of `main` (the actual merge graph proves
-   that parent has landed);
-3. exactly one open PR must have that branch as its head; and
+2. exactly one open PR must have that branch as its head (an open, initially empty
+   parent is valid because merging its child gives it work to carry);
+3. merged PR metadata and the actual ancestry graph must not show a dead parent; and
 4. that parent's base must recursively satisfy the same rules until `main`.
 
 Thus a live `child -> parent -> main` stack passes, while deleted, orphaned,
@@ -31,9 +32,12 @@ the merge deliverable and is intentionally rejected.
 
 ## Operations and limitations
 
-Make `Stacked PR base guard / verify-delivery-path` a required status check for
-`main` and every branch used as a stack base. The workflow has read-only permissions
-and never checks out or executes PR code. It assumes the delivery branch is named
+Make the commit status **`stacked-pr-base-guard`** required for `main` and every
+branch used as a stack base. The workflow audits every open PR and republishes its
+status whenever any PR closes; this is what invalidates a child's old green status
+when its parent merges without changing the child. The workflow can write commit
+statuses, but has read-only content/PR permissions and never checks out or executes
+PR code. It assumes the delivery branch is named
 `main` and same-repository branches are used for intermediate stack parents. PRs
 from forks may target `main`, but fork-owned intermediate stacks require a future
 identity-aware extension. GitHub's API and a complete remote fetch must be available;

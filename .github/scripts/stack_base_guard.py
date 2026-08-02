@@ -48,10 +48,6 @@ def verify(base, main, remote, repository, prs):
         if not ref_exists(remote, branch):
             raise UnsafeStack(
                 f"target branch '{branch}' no longer exists on the remote (it may have been deleted)")
-        if is_ancestor(remote, branch, main):
-            raise UnsafeStack(
-                f"stack parent '{branch}' is already contained in '{main}' (the parent has merged)")
-
         candidates = [p for p in prs if field(p, "head", "ref") == branch and
                       (not repository or field(p, "head", "repo",) in (None, repository))]
         open_prs = [p for p in candidates if p.get("state") == "open"]
@@ -60,10 +56,18 @@ def verify(base, main, remote, repository, prs):
             if merged:
                 raise UnsafeStack(
                     f"stack parent PR for '{branch}' has already merged, but this PR still targets it")
+            if is_ancestor(remote, branch, main):
+                raise UnsafeStack(
+                    f"stack parent '{branch}' is already contained in '{main}' (the parent has merged)")
             raise UnsafeStack(
                 f"target branch '{branch}' has no open parent PR carrying it toward '{main}'")
         if len(open_prs) > 1:
             raise UnsafeStack(f"multiple open parent PRs use '{branch}'; the route to '{main}' is ambiguous")
+
+        # An open parent remains a delivery route even when its branch currently
+        # equals main: merging this child adds new work for that parent to carry.
+        # With no open parent, the checks above use both merged PR metadata and
+        # graph ancestry, defending against squash merges and incomplete history.
 
         branch = field(open_prs[0], "base", "ref")
         if not branch:
