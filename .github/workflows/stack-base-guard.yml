@@ -1,0 +1,34 @@
+name: Stacked PR base guard
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify-delivery-path:
+    runs-on: ubuntu-latest
+    steps:
+      # Always execute the trusted guard from main, never code from the PR head or its base.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Fetch the actual branch graph
+        run: git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+      - name: Read pull request routes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --paginate 'repos/${{ github.repository }}/pulls?state=all&per_page=100' --jq '.[]' | jq -s . > "$RUNNER_TEMP/pulls.json"
+      - name: Verify target can carry this PR to main
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 .github/scripts/stack_base_guard.py \
+            --base "$BASE_REF" \
+            --repository "$REPOSITORY" \
+            --prs-json "$RUNNER_TEMP/pulls.json"
