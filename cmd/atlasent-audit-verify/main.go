@@ -185,6 +185,43 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 			res.CorrelationRecordsVerified)
 	}
 
+	fmt.Fprintf(os.Stdout, "[%s] Evidence archive integrity", mark(res.ArchiveIntegrity))
+	if res.ArchiveIntegrity == envelope.LayerAbsent {
+		fmt.Fprint(os.Stdout, " — absent (no archive disclosure or integrity-probe records in this export)")
+	} else {
+		fmt.Fprintf(os.Stdout, " — %d/%d record(s) verified, protection: %s, org_binding: %s",
+			res.ArchiveRecordsVerified, res.ArchiveRecordsTotal, res.ArchiveProtection, res.ArchiveOrgBinding)
+	}
+	fmt.Fprintln(os.Stdout)
+
+	// Archive breakdown. The four states are printed as four separate lines on
+	// purpose: "the archive was read" is not "the read was allowed", and "a
+	// probe ran" is not "the bytes were confirmed". Collapsing either pair
+	// would let a reader infer assurance the records do not carry.
+	if res.ArchiveIntegrity == envelope.LayerValid && res.ArchiveRecordsVerified > 0 {
+		st := res.ArchiveStages
+		row := func(label, detail string) {
+			fmt.Fprintf(os.Stdout, "    ├─ %-22s %s\n", label, detail)
+		}
+		if st.RetrievalAttempted > 0 {
+			row("Retrieval attempted", fmt.Sprintf("%d disclosure request(s) recorded", st.RetrievalAttempted))
+			row("Retrieval succeeded", fmt.Sprintf("%d released bytes to the caller", st.RetrievalSucceeded))
+			row("Retrieval refused", fmt.Sprintf("%d denied", st.RetrievalFailed))
+		}
+		if st.ProbeExecuted > 0 {
+			row("Probe executed", fmt.Sprintf("%d sampled-object check(s) ran", st.ProbeExecuted))
+			row("Integrity confirmed", fmt.Sprintf("%d object(s) matched every assertion", st.IntegrityConfirmed))
+			row("Integrity failed", fmt.Sprintf("%d mismatched or unreadable", st.IntegrityFailed))
+			if st.IntegrityInconclusive > 0 {
+				row("Integrity inconclusive", fmt.Sprintf("%d had nothing to check against (NOT a pass)", st.IntegrityInconclusive))
+			}
+		}
+		// The ceiling statement. Printed whenever archive records verified,
+		// including when zero of them carry retention metadata, so nobody
+		// reads a green archive line as a retention guarantee.
+		fmt.Fprintf(os.Stdout, "    └─ %-22s %s\n", "Retention", retentionLine(res))
+	}
+
 	for _, f := range res.Findings {
 		if f.Record != "" {
 			fmt.Fprintf(os.Stdout, "  ! %s [%s]: %s\n", f.Code, f.Record, f.Detail)
@@ -201,6 +238,23 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "\nfound %d issue(s)\n", len(res.Findings))
+	}
+}
+
+// retentionLine states exactly what this tool can say about retention, and no
+// more. The verifier is offline by contract — it never contacts an object
+// store — so exported retention metadata is a claim the producer recorded, not
+// evidence a lock exists on real storage. There is deliberately no branch here
+// that reports retention as verified.
+func retentionLine(res *envelope.VerificationResult) string {
+	switch res.RetentionAssurance {
+	case envelope.RetentionRecordedNotVerified:
+		return fmt.Sprintf("%d record(s) carry provider-confirmed retention metadata — RECORDED, not verified by this tool (offline: no object store is contacted)",
+			res.ArchiveRetentionRecords)
+	case envelope.RetentionNotRecorded:
+		return "no retention metadata recorded on these archive records — this export does NOT evidence a retention term"
+	default:
+		return "not applicable (no archive records)"
 	}
 }
 

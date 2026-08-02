@@ -45,12 +45,37 @@ const (
 	CodeCorrelationLifecycleInvalid       FailureCode = "CORRELATION_LIFECYCLE_INVALID"
 	CodeCorrelationDuplicate              FailureCode = "CORRELATION_DUPLICATE"
 	CodeCorrelationConflict               FailureCode = "CORRELATION_CONFLICT"
+
+	// Archive-level (Evidence Archive records: governed retrieval disclosures
+	// and sampled-object integrity verdicts, certification version 5+).
+	// Deliberately a SEPARATE family from CORRELATION_* — a consumer branching
+	// on codes must be able to tell "the post-execution correlation section is
+	// incoherent" from "the archive-disclosure section is incoherent"; they
+	// have different owners and different remediations.
+	CodeArchiveReferenceMissing       FailureCode = "ARCHIVE_REFERENCE_MISSING"
+	CodeArchiveReferenceOutsideExport FailureCode = "ARCHIVE_REFERENCE_OUTSIDE_EXPORT"
+	CodeArchiveOrgMismatch            FailureCode = "ARCHIVE_ORG_MISMATCH"
+	CodeArchiveDuplicate              FailureCode = "ARCHIVE_DUPLICATE"
+	CodeArchiveConflict               FailureCode = "ARCHIVE_CONFLICT"
+	CodeArchiveOutcomeUnknown         FailureCode = "ARCHIVE_OUTCOME_UNKNOWN"
+
+	// Certification-level.
+	CodeUnsupportedCertificationVersion FailureCode = "UNSUPPORTED_CERTIFICATION_VERSION"
+	CodeCertificationCountMismatch      FailureCode = "CERTIFICATION_COUNT_MISMATCH"
 )
 
 // SupportedEnvelopeVersion is the only envelope `version` this verifier
 // accepts. Any other value fails closed (UNSUPPORTED_ENVELOPE_VERSION) — an
 // unknown envelope shape is never assumed safe.
 const SupportedEnvelopeVersion = 1
+
+// SupportedCertificationVersion is the highest certified-copy manifest version
+// this verifier understands. A LOWER version is accepted unchanged — v1–v4
+// bundles predate the Evidence Archive sections and verify exactly as they did
+// before, which is the backward-compatibility contract. A HIGHER version fails
+// closed: a newer producer may bind sections this build cannot see, and
+// silently ignoring them would report a partial check as a complete one.
+const SupportedCertificationVersion = 5
 
 // Layer is a per-layer verdict in the 3-layer VerificationResult.
 type Layer string
@@ -115,6 +140,57 @@ const (
 	OrgBindingNotApplicable OrgBinding = "not_applicable" // no correlation records
 )
 
+// ArchiveStages tallies what the VERIFIED archive records actually evidence.
+// The distinctions are deliberate and load-bearing: an auditor asking "was the
+// archive read?" and one asking "was the read allowed?" are asking different
+// questions, and a reader who only sees "3 retrievals" cannot tell a granted
+// disclosure from a refused one. Likewise "the probe ran" and "the bytes were
+// confirmed" are separate facts — a probe that ran and could not check
+// anything is not evidence of integrity.
+type ArchiveStages struct {
+	// RetrievalAttempted counts every verified retrieval record: the archive
+	// was asked for, whatever the answer.
+	RetrievalAttempted int `json:"retrieval_attempted"`
+	// RetrievalSucceeded counts disclosures that actually released bytes.
+	RetrievalSucceeded int `json:"retrieval_succeeded"`
+	// RetrievalFailed counts REFUSALS. Exported and counted deliberately — a
+	// bundle carrying only successes makes "nobody was refused" and "refusals
+	// were dropped" indistinguishable.
+	RetrievalFailed int `json:"retrieval_failed"`
+
+	// ProbeExecuted counts every verified integrity-probe record: a scheduled
+	// read-assurance check ran against a sampled object.
+	ProbeExecuted int `json:"probe_executed"`
+	// IntegrityConfirmed counts probes whose assertions all agreed.
+	IntegrityConfirmed int `json:"integrity_confirmed"`
+	// IntegrityFailed counts probes that positively disagreed or could not
+	// read the object (mismatch / unreadable).
+	IntegrityFailed int `json:"integrity_failed"`
+	// IntegrityInconclusive counts probes that had nothing to check against.
+	// NEVER folded into confirmed or failed: "we could not check" is a third
+	// fact, and a reader given only two buckets will read it as one of them.
+	IntegrityInconclusive int `json:"integrity_inconclusive"`
+}
+
+// RetentionAssurance states what this verifier can say about retention. It
+// exists to stop a stronger claim being read into a green run than the tool
+// can support.
+type RetentionAssurance string
+
+const (
+	// RetentionNotApplicable — no archive records in this bundle.
+	RetentionNotApplicable RetentionAssurance = "not_applicable"
+	// RetentionNotRecorded — archive records are present but none carry
+	// provider-confirmed retention metadata.
+	RetentionNotRecorded RetentionAssurance = "not_recorded"
+	// RetentionRecordedNotVerified — records carry retention metadata the
+	// PRODUCER asserts the provider confirmed. This verifier is offline by
+	// contract: it never contacts an object store, so it cannot and does not
+	// confirm a retention lock exists on real storage. There is deliberately
+	// no value above this one.
+	RetentionRecordedNotVerified RetentionAssurance = "recorded_not_verified_offline"
+)
+
 // CorrelationStages tallies the CCAM lifecycle stages evidenced by the
 // VERIFIED correlation records (records that passed every semantic check).
 // These back the CLI's honest per-stage lines: a stage is shown only when
@@ -176,6 +252,42 @@ type VerificationResult struct {
 	// checkable (see OrgBinding).
 	OrgBinding OrgBinding `json:"org_binding"`
 
+	// ArchiveIntegrity is the semantic verdict over the Evidence Archive
+	// sections (retrieval_events[] + probe_events[]). "absent" (SUCCESS) when
+	// the bundle carries neither — a v4-or-earlier bundle, or a v5 bundle from
+	// an org with no archive activity.
+	ArchiveIntegrity Layer `json:"archive_integrity"`
+
+	// ArchiveProtection names WHAT protects the archive records — the same
+	// outer envelope signature, never the per-row entry_hash chain.
+	ArchiveProtection string `json:"archive_protection,omitempty"`
+
+	// ArchiveRecordsVerified / ArchiveRecordsTotal count archive records that
+	// passed every semantic check, and the number present.
+	ArchiveRecordsVerified int `json:"archive_records_verified"`
+	ArchiveRecordsTotal    int `json:"archive_records_total"`
+
+	// ArchiveStages breaks the verified archive records down by what they
+	// actually evidence (see ArchiveStages).
+	ArchiveStages ArchiveStages `json:"archive_stages"`
+
+	// ArchiveOrgBinding reports whether the archive records' org tie was
+	// checkable (same vocabulary as OrgBinding).
+	ArchiveOrgBinding OrgBinding `json:"archive_org_binding"`
+
+	// ArchiveRetentionRecords counts verified archive records carrying
+	// provider-confirmed retention metadata. A COUNT OF CLAIMS RECORDED, not
+	// of retention verified — see RetentionAssurance.
+	ArchiveRetentionRecords int `json:"archive_retention_records"`
+
+	// RetentionAssurance states the ceiling of what this offline tool can say
+	// about retention. Never rises above "recorded_not_verified_offline".
+	RetentionAssurance RetentionAssurance `json:"retention_assurance"`
+
+	// CertificationVersion echoes the bundle's certification.version when a
+	// certification manifest is present (0 when absent).
+	CertificationVersion int `json:"certification_version,omitempty"`
+
 	// KeyID is the envelope's declared signing key id (echoed for the reader).
 	KeyID string `json:"key_id,omitempty"`
 	// KeyTrusted is true when the outer signature verified against a key
@@ -198,7 +310,8 @@ func (r *VerificationResult) OK() bool {
 	}
 	if r.EnvelopeIntegrity == LayerInvalid ||
 		r.LedgerIntegrity == LayerInvalid ||
-		r.CorrelationIntegrity == LayerInvalid {
+		r.CorrelationIntegrity == LayerInvalid ||
+		r.ArchiveIntegrity == LayerInvalid {
 		return false
 	}
 	return true
@@ -238,6 +351,92 @@ type Envelope struct {
 	Evaluations   []json.RawMessage `json:"evaluations"`
 	Verifications []VerificationRow `json:"verification_events"`
 	Correlations  []CorrelationRow  `json:"correlation_events"`
+
+	// Evidence Archive sections, added at certification version 5. Absent on
+	// every earlier bundle — decoding to nil slices, which the archive layer
+	// reports as "absent" (success), so a v4 bundle verifies exactly as before.
+	Retrievals []RetrievalRow `json:"retrieval_events"`
+	Probes     []ProbeRow     `json:"probe_events"`
+
+	// Certification is the certified-copy manifest when the export requested
+	// one. Optional: an uncertified bundle is a normal, valid export.
+	Certification *Certification `json:"certification"`
+}
+
+// Certification mirrors the certified-copy manifest emitted by
+// _shared/certified-copy.ts. Only the fields this verifier cross-checks are
+// modeled; unknown fields are ignored so a later manifest addition does not
+// break an older verifier.
+type Certification struct {
+	Version      int                       `json:"version"`
+	RecordCounts CertificationRecordCounts `json:"record_counts"`
+}
+
+// CertificationRecordCounts is the manifest's per-section census. The verifier
+// re-counts the arrays it can see and reports a mismatch: a manifest that
+// claims more records than the bundle contains is the signature a truncated
+// export leaves behind.
+type CertificationRecordCounts struct {
+	Evaluations        *int `json:"evaluations"`
+	VerificationEvents *int `json:"verification_events"`
+	CorrelationEvents  *int `json:"correlation_events"`
+	RetrievalEvents    *int `json:"retrieval_events"`
+	ProbeEvents        *int `json:"probe_events"`
+}
+
+// RetrievalRow mirrors export_retrieval_events_rows — one governed DISCLOSURE
+// of archived evidence (verification_events rows with
+// event_type=evidence_retrieval).
+type RetrievalRow struct {
+	ID                   string `json:"id"`
+	DecisionID           string `json:"decision_id"`
+	PermitTokenHash      string `json:"permit_token_hash"`
+	PresentedActorID     string `json:"presented_actor_id"`
+	PresentedActionType  string `json:"presented_action_type"`
+	PresentedEnvironment string `json:"presented_environment"`
+	RetrievalStatus      string `json:"retrieval_status"` // retrieved | denied
+	Specialization       string `json:"specialization"`
+	ObjectID             string `json:"object_id"`
+	Purpose              string `json:"purpose"`
+	ReturnedSHA256       string `json:"returned_sha256"`
+	ByteSize             *int64 `json:"byte_size"`
+	IntegrityVerified    *bool  `json:"integrity_verified"`
+	VerificationDetail   string `json:"verification_detail"`
+	VerifyErrorCode      string `json:"verify_error_code"`
+	VerifiedAt           string `json:"verified_at"`
+	OrganizationID       string `json:"organization_id"`
+
+	// Retention metadata joined from the archival receipt. RECORDED CLAIMS,
+	// never proof — see RetentionAssurance.
+	ArchiveProvider          string `json:"archive_provider"`
+	ArchiveRetentionMode     string `json:"archive_retention_mode"`
+	ArchiveRetainUntil       string `json:"archive_retain_until"`
+	ArchiveRetentionEnforced *bool  `json:"archive_retention_enforced"`
+	ArchiveContentSHA256     string `json:"archive_content_sha256"`
+}
+
+// ProbeRow mirrors export_probe_events_rows — one sampled-object integrity
+// VERDICT (verification_events rows with event_type=archive_integrity_probe).
+// A probe reads bytes only to hash them; the bytes are never carried here.
+type ProbeRow struct {
+	ID                 string `json:"id"`
+	ProbeStatus        string `json:"probe_status"` // verified | mismatch | unreadable | inconclusive
+	ObjectID           string `json:"object_id"`
+	ProbeRunID         string `json:"probe_run_id"`
+	ProbeVersionID     string `json:"probe_version_id"`
+	ProbePopulation    *int   `json:"probe_population"`
+	ReturnedSHA256     string `json:"returned_sha256"`
+	ByteSize           *int64 `json:"byte_size"`
+	IntegrityVerified  *bool  `json:"integrity_verified"`
+	VerificationDetail string `json:"verification_detail"`
+	VerifiedAt         string `json:"verified_at"`
+	OrganizationID     string `json:"organization_id"`
+
+	ArchiveProvider          string `json:"archive_provider"`
+	ArchiveRetentionMode     string `json:"archive_retention_mode"`
+	ArchiveRetainUntil       string `json:"archive_retain_until"`
+	ArchiveRetentionEnforced *bool  `json:"archive_retention_enforced"`
+	ArchiveContentSHA256     string `json:"archive_content_sha256"`
 }
 
 // VerificationRow mirrors export_verification_events_rows (the permit-

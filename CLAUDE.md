@@ -39,10 +39,11 @@ single JSON object carrying `public_key_pem`/`evaluations` and no
    folded into the per-row `entry_hash` chain (ADR-020 offline-verifier parity;
    ADR-048 single evidence ledger).
 
-### Envelope verification is 3 independent layers
+### Envelope verification is 4 independent layers
 
-`internal/envelope` produces a `VerificationResult` with three verdicts —
-`envelope_integrity`, `ledger_integrity`, `correlation_integrity`. The
+`internal/envelope` produces a `VerificationResult` with four verdicts —
+`envelope_integrity`, `ledger_integrity`, `correlation_integrity`,
+`archive_integrity`. The
 machine-readable (`--json`) wire vocabulary is `verified` / `invalid` /
 `absent` (plus `verified_untrusted_key` for the envelope layer when the outer
 signature verifies only against the envelope's **embedded** `public_key_pem`,
@@ -71,20 +72,98 @@ that backs the CLI's honest Permit / Observation / Correlation lifecycle lines
   there is no duplicate/conflict. `correlation_protection` is always
   `outer_envelope_signature`. Absence of correlation records is a SUCCESS
   (`absent`), never an error.
+- **Evidence Archive** — semantic validation of `retrieval_events[]` (governed
+  archive DISCLOSURES) and `probe_events[]` (sampled-object integrity
+  VERDICTS), added at certification version 5. Same posture as correlation:
+  the signature proves the bytes weren't altered; this layer asks whether the
+  records are internally coherent and anchored to the rest of the bundle.
+  Absence is a SUCCESS (`absent`) — that is every v4-and-earlier bundle, and
+  every v5 bundle from an org with no archive activity.
 
 Machine-readable failure codes: `ENVELOPE_SIGNATURE_INVALID`,
 `UNSUPPORTED_ENVELOPE_VERSION`, `LEDGER_HASH_MISMATCH`, `LEDGER_CHAIN_BROKEN`,
 `CORRELATION_REFERENCE_MISSING`, `CORRELATION_REFERENCE_OUTSIDE_EXPORT`,
 `CORRELATION_ORG_MISMATCH`, `CORRELATION_ACTION_MISMATCH`,
 `CORRELATION_TARGET_MISMATCH`, `CORRELATION_LIFECYCLE_INVALID`,
-`CORRELATION_DUPLICATE`, `CORRELATION_CONFLICT`.
+`CORRELATION_DUPLICATE`, `CORRELATION_CONFLICT`,
+`ARCHIVE_REFERENCE_MISSING`, `ARCHIVE_REFERENCE_OUTSIDE_EXPORT`,
+`ARCHIVE_ORG_MISMATCH`, `ARCHIVE_DUPLICATE`, `ARCHIVE_CONFLICT`,
+`ARCHIVE_OUTCOME_UNKNOWN`, `UNSUPPORTED_CERTIFICATION_VERSION`,
+`CERTIFICATION_COUNT_MISMATCH`.
 
-**Org binding honesty:** the current export projections carry no per-record
-`organization_id`, so within a single re-signed envelope there is no field to
-bind a record to an org. This is reported as `org_binding:
-not_present_in_export` (not a false pass); the check activates automatically
-once the producer surfaces `organization_id` on the correlation / evaluation
-projections.
+The `ARCHIVE_*` family is deliberately separate from `CORRELATION_*`: a
+consumer branching on codes must be able to tell "the post-execution
+correlation section is incoherent" from "the archive-disclosure section is
+incoherent" — different owners, different remediations.
+
+**Org binding honesty:** org binding is reported per section
+(`org_binding` for correlation, `archive_org_binding` for the archive
+sections) with three states — `checked`, `not_present_in_export`, and
+`not_applicable` (no records of that kind). A record carrying no
+`organization_id` is reported as `not_present_in_export`, never as a pass; and
+when some records in a section carry it and some do not, the weaker state is
+reported, because a partial check is not a check.
+
+### Evidence Archive layer (certification version 5)
+
+Two sections, four distinct states, reported separately — the distinctions are
+load-bearing. "The archive was read" is not "the read was allowed", and "a
+probe ran" is not "the bytes were confirmed". `archive_stages` carries all of
+`retrieval_attempted` / `retrieval_succeeded` / `retrieval_failed` /
+`probe_executed` / `integrity_confirmed` / `integrity_failed` /
+`integrity_inconclusive`.
+
+`integrity_inconclusive` is **never** folded into confirmed or failed. A probe
+that ran and had nothing to check against is a third fact; a reader given only
+two buckets will read it as one of them.
+
+Rejected per record: MISSING required fields (a disclosure with no WHAT, WHO,
+or WHY is a rumour of a disclosure, not evidence of one), DUPLICATE ids (they
+inflate any count an auditor derives), CROSS-ORGANIZATION records, UNKNOWN
+outcomes (a status outside the closed vocabulary would be read as neither
+success nor failure), CONFLICTS (a success recording no bytes; a refusal
+recording released bytes; a refusal with no reason code; a `verified` probe
+with no subject hash), and OUT-OF-BUNDLE references (a disclosure naming a
+`decision_id` the export does not contain — reported only when the bundle
+carries evaluations at all, since a narrow export legitimately has none).
+
+**Denials are first-class.** They are exported, verified, and counted, because
+a bundle carrying only successful reads makes "nobody was refused" and
+"refusals were dropped" indistinguishable.
+
+#### Retention is RECORDED, never verified
+
+`retention_assurance` has exactly three values — `not_applicable`,
+`not_recorded`, and `recorded_not_verified_offline` — and **there is no fourth**.
+This verifier is offline by contract: it never contacts an object store, so
+exported retention metadata is a claim the producer recorded, not proof that a
+retention lock exists on real storage. `archive_retention_records` is a count
+of *claims recorded*, and a record whose `archive_retention_enforced` is not
+true is deliberately not counted (a term the provider never accepted is not a
+recorded retention).
+
+**Do not add a code path that upgrades this.** Support for these records in
+the export format is not evidence that a six-year retention guarantee is
+active; that requires provider-enforced storage and a live acceptance run.
+
+#### Certification version gate
+
+`SupportedCertificationVersion = 5`. A **lower** version is accepted unchanged
+— v1–v4 bundles predate the archive sections and verify exactly as before,
+which is the backward-compatibility contract. A **higher** version fails closed
+(`UNSUPPORTED_CERTIFICATION_VERSION`): a newer producer may bind sections this
+build cannot see, and silently ignoring them would report a partial check as a
+complete one. The manifest's `record_counts` census is cross-checked against
+the arrays present (`CERTIFICATION_COUNT_MISMATCH`) — only for sections the
+manifest actually declares, so an older manifest is not treated as claiming
+zero.
+
+Committed deterministic fixtures live in `cmd/atlasent-audit-verify/testdata/`
+(`archive-export.json`, signed once under a fixed key; the trusted keyfile is
+derived from the fixture at test time because `.gitignore` blanket-ignores
+`*.pem`). If
+canonicalization or the wire shape ever drifts, the committed signature stops
+verifying and the drift surfaces in CI rather than in a customer's audit.
 
 ### JCS canonicalization (`internal/jcs`)
 
@@ -227,6 +306,10 @@ invariant is a canonical-form spec version bump.
 cmd/atlasent-audit-verify/   main entrypoint + CLI flags
 internal/canonical/          JSON canonicalizer (audit-chain v5 canonical form)
 internal/chain/              entry types, verify loop, head anchors, key interface
+internal/envelope/           signed-export envelope: outer signature, ledger,
+                             correlation (correlation.go), Evidence Archive
+                             disclosures + integrity probes (archive.go)
+internal/jcs/                RFC 8785 JCS canonicalizer (outer-signature bytes)
 internal/keys/               PEM keystore (kid → ed25519.PublicKey)
 .github/workflows/
   ci.yml                     vet + test (race) + static build sanity on every PR
@@ -246,7 +329,14 @@ internal/keys/               PEM keystore (kid → ed25519.PublicKey)
   a skipped signature (unknown `key_version`) is promoted to a failure (exit 1) — see
   the strict-acceptance section above.
 - **Backwards compatible** — the verifier accepts both the v5 prefixed `"ed25519:<base64url>"`
-  signature format and the legacy plain base64 format.
+  signature format and the legacy plain base64 format. On the envelope path,
+  certification versions 1–5 are all accepted; a bundle with no Evidence
+  Archive sections verifies exactly as it did before those sections existed.
+- **Never claim retention this tool cannot observe** — the verifier is offline
+  by contract, so `retention_assurance` tops out at
+  `recorded_not_verified_offline`. Do not add a branch that reports retention
+  as verified, and do not let CLI wording imply a live retention guarantee
+  because the export format carries the records.
 
 ## Branch convention
 

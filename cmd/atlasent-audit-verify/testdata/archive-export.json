@@ -1,0 +1,93 @@
+{
+  "certification": {
+    "record_counts": {
+      "correlation_events": 0,
+      "evaluations": 1,
+      "probe_events": 2,
+      "retrieval_events": 2,
+      "verification_events": 0
+    },
+    "version": 5
+  },
+  "evaluations": [
+    {
+      "canonical_payload": "v2|org-1|ac|d1|actor|allow||fp|ph1|b|1|rh|rf|2026-08-01T00:00:00.000000Z|GENESIS",
+      "decision": "allow",
+      "entry_hash": "cf16a24f0ae333ce575a7da58377a2c890252de15c114fe82e7662bcb13b5ada",
+      "id": "d1",
+      "permit_token_hash": "ph1",
+      "prev_hash": ""
+    }
+  ],
+  "generated_at": "2026-08-02T00:00:00.000Z",
+  "key_id": "r3-audit-fixture",
+  "org_id": "org-1",
+  "probe_events": [
+    {
+      "archive_provider": "s3",
+      "archive_retain_until": "2032-07-31T00:00:00.000Z",
+      "archive_retention_enforced": true,
+      "archive_retention_mode": "compliance",
+      "byte_size": 4096,
+      "id": "probe-1",
+      "integrity_verified": true,
+      "object_id": "evidence/org-1/2026-07/window-01.json",
+      "organization_id": "org-1",
+      "probe_population": 42,
+      "probe_run_id": "run-2026-08-02",
+      "probe_status": "verified",
+      "probe_version_id": "v-abc123",
+      "returned_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verified_at": "2026-08-02T04:15:00.000Z"
+    },
+    {
+      "id": "probe-2",
+      "object_id": "evidence/org-1/2026-06/window-01.json",
+      "organization_id": "org-1",
+      "probe_population": 42,
+      "probe_run_id": "run-2026-08-02",
+      "probe_status": "inconclusive",
+      "verification_detail": "no signed manifest stored for this object",
+      "verified_at": "2026-08-02T04:15:01.000Z"
+    }
+  ],
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=\n-----END PUBLIC KEY-----\n",
+  "retrieval_events": [
+    {
+      "archive_content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archive_provider": "s3",
+      "archive_retain_until": "2032-07-31T00:00:00.000Z",
+      "archive_retention_enforced": true,
+      "archive_retention_mode": "compliance",
+      "byte_size": 4096,
+      "decision_id": "d1",
+      "id": "ret-1",
+      "integrity_verified": true,
+      "object_id": "evidence/org-1/2026-07/window-01.json",
+      "organization_id": "org-1",
+      "presented_action_type": "data.export",
+      "presented_actor_id": "user:auditor-a",
+      "presented_environment": "live",
+      "purpose": "regulator_request",
+      "retrieval_status": "retrieved",
+      "returned_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "specialization": "evidence_archive_retrieval",
+      "verified_at": "2026-08-02T10:00:00.000Z"
+    },
+    {
+      "id": "ret-2",
+      "object_id": "evidence/org-1/2026-07/window-01.json",
+      "organization_id": "org-1",
+      "presented_action_type": "data.export",
+      "presented_actor_id": "user:contractor-b",
+      "presented_environment": "live",
+      "purpose": "ad_hoc_review",
+      "retrieval_status": "denied",
+      "specialization": "evidence_archive_retrieval",
+      "verified_at": "2026-08-02T11:00:00.000Z",
+      "verify_error_code": "BOUNDARY_VIOLATION"
+    }
+  ],
+  "signature": "DxAkQ+q+DoHGJXBnGw6pM1PKdReh/3ADJHFMltUSzOD/zT/yn8NgYAaDFe7KPVtpNDUuvBSwDdOEI8fZHZYfAg==",
+  "version": 1
+}
