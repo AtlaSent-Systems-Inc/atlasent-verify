@@ -1,0 +1,60 @@
+name: Stacked PR base guard
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review, closed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+# A newer repository audit must not be overwritten by an older, slower run.
+concurrency:
+  group: stacked-pr-base-guard
+  cancel-in-progress: true
+
+jobs:
+  verify-delivery-path:
+    runs-on: ubuntu-latest
+    steps:
+      # Always execute the trusted guard from main, never code from the PR head or its base.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Fetch the actual branch graph
+        run: git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+      - name: Read pull request routes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --paginate 'repos/${{ github.repository }}/pulls?state=all&per_page=100' --jq '.[]' | jq -s . > "$RUNNER_TEMP/pulls.json"
+      - name: Audit every open PR and publish the required status
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          # Auditing all open PRs is essential: merging a parent does not emit a
+          # synchronize event for its children, so their previous green result
+          # must be actively replaced after the delivery route dies.
+          jq -c '.[] | select(.state == "open")' "$RUNNER_TEMP/pulls.json" |
+          while IFS= read -r pr; do
+            base=$(jq -r '.base.ref' <<<"$pr")
+            sha=$(jq -r '.head.sha' <<<"$pr")
+            number=$(jq -r '.number' <<<"$pr")
+            output="$RUNNER_TEMP/guard-$number.log"
+            if python3 .github/scripts/stack_base_guard.py \
+                --base "$base" --repository "$REPOSITORY" \
+                --prs-json "$RUNNER_TEMP/pulls.json" >"$output" 2>&1; then
+              state=success
+              description="Target branch has a live delivery path to main"
+            else
+              state=failure
+              description="Unsafe stack base; retarget/rebase this PR"
+            fi
+            cat "$output"
+            gh api --method POST "repos/$REPOSITORY/statuses/$sha" \
+              -f state="$state" -f context="stacked-pr-base-guard" \
+              -f description="$description" \
+              -f target_url="${{ github.server_url }}/${REPOSITORY}/actions/runs/${{ github.run_id }}"
+          done
