@@ -32,6 +32,12 @@ jobs:
         run: gh api --paginate 'repos/${{ github.repository }}/pulls?state=all&per_page=100' --jq '.[]' | jq -s . > "$RUNNER_TEMP/pulls.json"
       - name: Audit every open PR and publish the required status
         env:
+          # gh api --method POST .../statuses/<sha> needs an auth token; without
+          # it gh exits 4 ("set the GH_TOKEN environment variable") and the
+          # required stacked-pr-base-guard status is never published — so the
+          # guard job fails even when every open PR has a live delivery path.
+          # Mirror the "Read pull request routes" step above, which already sets it.
+          GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
           # Auditing all open PRs is essential: merging a parent does not emit a
