@@ -39,11 +39,14 @@ class StackBaseGuardTest(unittest.TestCase):
         self.branch("parent"); self.branch("child-base", "parent")
         result = self.guard("child-base", [self.pr("child-base", "parent"), self.pr("parent", "main")])
         self.assertEqual(result.returncode, 0, result.stdout)
+<<<<<<< HEAD
     def test_live_empty_parent_branch_passes(self):
         self.gitrun("git", "branch", "empty-parent", "main")
         self.gitrun("git", "push", "origin", "empty-parent")
         result = self.guard("empty-parent", [self.pr("empty-parent", "main")])
         self.assertEqual(result.returncode, 0, result.stdout)
+=======
+>>>>>>> origin/main
     def test_deleted_base_fails(self):
         result = self.guard("deleted-parent", [])
         self.assertIn("no longer exists", result.stdout); self.assertEqual(result.returncode, 1)
@@ -55,6 +58,7 @@ class StackBaseGuardTest(unittest.TestCase):
         result = self.guard("squashed-parent", [self.pr("squashed-parent", "main", "closed", True)])
         self.assertEqual(result.returncode, 1)
         self.assertIn("has already merged", result.stdout)
+<<<<<<< HEAD
     def test_graph_merged_parent_fails_without_pr_history(self):
         self.branch("graph-parent")
         self.gitrun("git", "checkout", "main")
@@ -63,6 +67,8 @@ class StackBaseGuardTest(unittest.TestCase):
         result = self.guard("graph-parent", [])
         self.assertEqual(result.returncode, 1)
         self.assertIn("already contained in 'main'", result.stdout)
+=======
+>>>>>>> origin/main
     def test_rebased_child_retargeted_to_main_passes(self):
         self.branch("former-parent"); self.gitrun("git", "checkout", "main"); self.gitrun("git", "merge", "--ff-only", "former-parent")
         self.gitrun("git", "push", "origin", "main")
@@ -75,7 +81,11 @@ class StackBaseGuardTest(unittest.TestCase):
         for child in ("pr-1714", "pr-1715", "pr-1716"):
             result = self.guard("pr-1713", history)
             self.assertEqual(result.returncode, 1, child)
+<<<<<<< HEAD
             self.assertIn("has already merged", result.stdout)
+=======
+            self.assertIn("already contained in 'main'", result.stdout)
+>>>>>>> origin/main
 
 
 if __name__ == "__main__": unittest.main()

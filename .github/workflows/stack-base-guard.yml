@@ -2,18 +2,25 @@ name: Stacked PR base guard
 
 on:
   pull_request_target:
+<<<<<<< HEAD
     types: [opened, reopened, synchronize, edited, ready_for_review, closed]
   workflow_dispatch:
+=======
+    types: [opened, reopened, synchronize, edited]
+>>>>>>> origin/main
 
 permissions:
   contents: read
   pull-requests: read
+<<<<<<< HEAD
   statuses: write
 
 # A newer repository audit must not be overwritten by an older, slower run.
 concurrency:
   group: stacked-pr-base-guard
   cancel-in-progress: true
+=======
+>>>>>>> origin/main
 
 jobs:
   verify-delivery-path:
@@ -30,6 +37,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api --paginate 'repos/${{ github.repository }}/pulls?state=all&per_page=100' --jq '.[]' | jq -s . > "$RUNNER_TEMP/pulls.json"
+<<<<<<< HEAD
       - name: Audit every open PR and publish the required status
         env:
           REPOSITORY: ${{ github.repository }}
@@ -58,3 +66,14 @@ jobs:
               -f description="$description" \
               -f target_url="${{ github.server_url }}/${REPOSITORY}/actions/runs/${{ github.run_id }}"
           done
+=======
+      - name: Verify target can carry this PR to main
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 .github/scripts/stack_base_guard.py \
+            --base "$BASE_REF" \
+            --repository "$REPOSITORY" \
+            --prs-json "$RUNNER_TEMP/pulls.json"
+>>>>>>> origin/main
