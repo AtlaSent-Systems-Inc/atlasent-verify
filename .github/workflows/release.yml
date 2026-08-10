@@ -51,9 +51,54 @@ env:
   GO_VERSION: '1.24'
 
 jobs:
+  # ── AtlaSent release gate ──────────────────────────────────────────────
+  # Dogfooding fix: this workflow builds, signs, and publishes releases of
+  # the OFFLINE AUDIT-CHAIN VERIFIER ITSELF -- the tool a customer or
+  # auditor runs, with no NDA and no network access, to independently check
+  # that AtlaSent's own evidence chain hasn't been tampered with. It had no
+  # AtlaSent evaluate/permit gate at all: any push of a vX.Y.Z tag published
+  # a new signed release with zero authorization check. Found during a
+  # dogfooding audit of consequential actions AtlaSent's own coding agents
+  # can take against AtlaSent's own infrastructure. An unauthorized release
+  # of this specific tool is a higher-trust-impact target than most: it's
+  # the thing that's supposed to catch tampering, so its own supply chain
+  # deserves the same gate everything else in this audit got.
+  #
+  # Uses package.release (this is a versioned binary release, not a
+  # deployment), mirroring atlasent-action's own release.yml and
+  # atlasent-sdk's proven npm/PyPI publish gates. Not cross-checked against
+  # the actual seeded policy for whatever org this repo's key belongs to.
+  #
+  # Requires an ATLASENT_API_KEY secret (scopes evaluate:write,
+  # verify:execute) on this workflow's GitHub Environment (or repo/org
+  # secrets), or every real tag push fails at the gate step by design.
+  # `build` depends on this job; `sign-and-release` depends on `build`, so
+  # neither runs without a verified permit.
+  gate:
+    name: AtlaSent release gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: AtlaSent release gate
+        id: atlasent_gate
+        uses: atlasent-systems-inc/atlasent-action@v1
+        env:
+          ATLASENT_API_KEY: ${{ secrets.ATLASENT_API_KEY }}
+        with:
+          action: package.release
+          actor: ${{ github.actor }}
+          environment: production
+          api-url: https://kttccumlnmdtupgbyfue.supabase.co/functions/v1
+          context: '{"ref": "${{ github.ref }}", "repo": "${{ github.repository }}", "artifact": "atlasent-audit-verify"}'
+
   build:
     name: build ${{ matrix.os }}/${{ matrix.arch }}
     runs-on: ubuntu-latest
+    needs: gate
     strategy:
       fail-fast: false
       matrix:
