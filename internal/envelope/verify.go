@@ -9,8 +9,8 @@ import (
 	"encoding/pem"
 	"fmt"
 
-	"github.com/atlasent-systems-inc/atlasent-verify/internal/chain"
-	"github.com/atlasent-systems-inc/atlasent-verify/internal/jcs"
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/chain"
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/jcs"
 )
 
 // LooksLikeEnvelope reports whether raw is an audit-export ENVELOPE rather than

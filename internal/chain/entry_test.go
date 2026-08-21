@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/atlasent-systems-inc/atlasent-verify/internal/canonical"
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/canonical"
 )
 
 type memKeys struct{ pk ed25519.PublicKey }

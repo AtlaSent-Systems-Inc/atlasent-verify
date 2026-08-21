@@ -59,13 +59,23 @@ atlasent-audit-verify \
 
 Arguments:
 
-- `--chain` — newline-delimited JSON audit entries in causal order. Use `-` to
-  read from stdin.
+- `--chain` — path to the audit export to verify (`-` for stdin). Accepts
+  either an NDJSON audit chain or a signed export envelope; the shape is
+  auto-detected (see "Signed export envelopes" below).
 - `--keys` — optional PEM file containing Ed25519 public keys keyed by
-  `key_version`. If omitted, the CLI explicitly reports that signature
-  verification was not performed.
+  `key_version` (NDJSON mode) or `key_id` (envelope mode). If omitted, the
+  CLI explicitly reports that signature verification was not performed.
 - `--head` — optional trusted chain-head anchor obtained independently of the
-  export. Enables tail-truncation detection.
+  export (NDJSON mode only). Enables tail-truncation detection.
+- `--require-signatures` — strict-acceptance mode: fail (exit 1) instead of
+  warning when a signature can't be verified against a known key. Use this
+  flag whenever verifier output is being kept as pilot or acceptance
+  evidence — a bare exit `0` without it does not by itself prove every
+  signature was checked.
+- `--bundle` — force signed-export-envelope verification, overriding
+  auto-detection.
+- `--json` — emit the machine-readable verification result as JSON (envelope
+  mode).
 - `--version` — prints the verifier version and supported chain-version
   information.
 
@@ -75,6 +85,37 @@ Exit codes:
 - `1` — one or more verification findings were detected.
 - `2` — environment/input error such as a missing flag, unreadable file, or
   malformed key/anchor input.
+
+## Signed export envelopes
+
+`--chain` accepts a second input shape beyond a plain NDJSON audit chain: the
+**signed export envelope** produced by `v1-export-audit` — a single JSON
+object carrying multiple record arrays (`evaluations`, `verification_events`,
+`correlation_events`, and, from certification version 5 on, Evidence Archive
+disclosure/probe records), an embedded `public_key_pem`, and one outer
+Ed25519 signature over the whole bundle. The CLI auto-detects which shape it
+was given; pass `--bundle` to force envelope verification if detection is
+ever ambiguous.
+
+Envelope verification reports four independent layers rather than a single
+pass/fail:
+
+- **envelope integrity** — the outer signature, checked against a trusted key
+  from `--keys` (or, absent `--keys`, only against the envelope's own
+  embedded key — reported as `verified_untrusted_key`, not a full pass);
+- **ledger integrity** — the `evaluations[]` entry-hash chain;
+- **correlation integrity** — whether `correlation_events[]` are internally
+  coherent with the rest of the bundle (references resolve, lifecycle order
+  is respected, no duplicates/conflicts); absence of correlation records is a
+  clean pass, not a failure;
+- **archive integrity** — the same semantic-coherence treatment for Evidence
+  Archive disclosure and integrity-probe records (certification version 5+).
+
+Use `--json` to get this result as structured, machine-readable output. The
+full layer semantics, failure-code vocabulary, and org-binding reporting
+rules are specified in this repo's `CLAUDE.md` (and the linked verification
+contract docs) — this README only summarizes that envelope verification
+exists and how to invoke it.
 
 ## What the CLI verifies
 

@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/atlasent-systems-inc/atlasent-verify/internal/canonical"
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/canonical"
 )
 
 var binPath string
