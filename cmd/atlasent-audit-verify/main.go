@@ -19,9 +19,9 @@ import (
 	"io"
 	"os"
 
-	"github.com/atlasent-systems-inc/atlasent-verify/internal/chain"
-	"github.com/atlasent-systems-inc/atlasent-verify/internal/envelope"
-	"github.com/atlasent-systems-inc/atlasent-verify/internal/keys"
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/chain"
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/envelope"
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/keys"
 )
 
 // Version is stamped at build time via -ldflags
