@@ -61,7 +61,7 @@ func Bytes(v any) ([]byte, error) {
 // deserialization, where duplicates are still observable. This does
 // not affect the canonical bytes of any duplicate-free input.
 func FromJSON(src []byte) ([]byte, error) {
-	if err := checkNoDuplicateKeys(src); err != nil {
+	if err := CheckNoDuplicateKeys(src); err != nil {
 		return nil, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(src))
@@ -76,13 +76,26 @@ func FromJSON(src []byte) ([]byte, error) {
 	return Bytes(v)
 }
 
-// checkNoDuplicateKeys scans src as a JSON token stream and returns
+// CheckNoDuplicateKeys scans src as a JSON token stream and returns
 // ErrDuplicateKey if any object contains a repeated key at the same
 // nesting level. It does not otherwise validate JSON structure —
 // structural errors are left for the caller's Decode to surface with a
 // precise message (this function returns nil on a token error and lets
 // the caller proceed to parse).
-func checkNoDuplicateKeys(src []byte) error {
+//
+// Exported so every hash/signature-recomputation hot path that builds a
+// map from raw bytes (internal/chain's per-row canonicalizeForHash,
+// internal/envelope's outer-signature recompute) can share the SAME
+// duplicate-key rejection FromJSON uses, rather than each needing its own
+// copy. A raw JSON document with a duplicate object key is ambiguous
+// across parsers (RFC 8259 does not mandate first- vs last-value-wins);
+// Go's encoding/json silently resolves it as last-value-wins when
+// decoding into a map, which is invisible unless something scans the
+// token stream first. Two independent readers of the same signed bytes
+// disagreeing about their content is exactly the hazard canonical-form
+// v5's "no duplicate object keys (rejected)" invariant exists to close —
+// see canonical-form-v5.md.
+func CheckNoDuplicateKeys(src []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(src))
 	dec.UseNumber()
 

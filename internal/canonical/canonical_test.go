@@ -204,6 +204,21 @@ func TestDuplicateKeyGuardLeavesValidBytesUnchanged(t *testing.T) {
 	}
 }
 
+// TestCheckNoDuplicateKeysExported locks the exported wrapper used by
+// internal/chain and internal/envelope's hash/signature-recomputation hot
+// paths (see canonicalizeForHash and verifyOuterSignature) — both now call
+// CheckNoDuplicateKeys directly on raw bytes rather than only via the
+// FromJSON convenience wrapper, so this must keep working standalone.
+func TestCheckNoDuplicateKeysExported(t *testing.T) {
+	if err := CheckNoDuplicateKeys([]byte(`{"a":1,"b":2}`)); err != nil {
+		t.Errorf("clean object flagged as duplicate: %v", err)
+	}
+	err := CheckNoDuplicateKeys([]byte(`{"a":1,"a":2}`))
+	if !errors.Is(err, ErrDuplicateKey) {
+		t.Errorf("want ErrDuplicateKey, got: %v", err)
+	}
+}
+
 func contains(s, sub string) bool {
 	return bytes.Contains([]byte(s), []byte(sub))
 }

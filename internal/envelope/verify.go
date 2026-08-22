@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/canonical"
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/chain"
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/jcs"
 )
@@ -246,6 +247,16 @@ func VerifyNDJSONLedgerOnly(chainResult *chain.Result, keysSupplied bool) *Verif
 func verifyOuterSignature(raw []byte, env *Envelope, keys chain.KeyStore, res *VerificationResult) (Layer, bool) {
 	if env.Signature == "" {
 		res.AddFinding(CodeEnvelopeSignatureInvalid, "", "envelope carries no signature (unsigned export)")
+		return LayerInvalid, false
+	}
+
+	// Reject duplicate top-level object keys before recomputing the signed
+	// bytes: same parser-differential hazard as the NDJSON chain hash path
+	// (see canonical.CheckNoDuplicateKeys) — a duplicate key would silently
+	// collapse to Go's last-value-wins map decode below with no trace that
+	// two readers of these exact bytes could disagree on their content.
+	if err := canonical.CheckNoDuplicateKeys(raw); err != nil {
+		res.AddFinding(CodeEnvelopeSignatureInvalid, "", "envelope contains duplicate JSON object key(s): "+err.Error())
 		return LayerInvalid, false
 	}
 

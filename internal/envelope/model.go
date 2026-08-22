@@ -45,6 +45,16 @@ const (
 	CodeCorrelationLifecycleInvalid       FailureCode = "CORRELATION_LIFECYCLE_INVALID"
 	CodeCorrelationDuplicate              FailureCode = "CORRELATION_DUPLICATE"
 	CodeCorrelationConflict               FailureCode = "CORRELATION_CONFLICT"
+	// CodeCorrelationDecisionMismatch fires when a correlation's declared
+	// decision_id disagrees with the Decision its OWN permit_token_hash
+	// actually resolves to in this export — i.e. the record's two
+	// reference fields point at two different decisions. Distinct from
+	// CodeCorrelationReferenceOutsideExport (which fires when the
+	// reference does not resolve at all): here it resolves, just to the
+	// wrong Decision. This is the "permit belonging to another decision"
+	// case — a permit legitimately issued for Decision B, misattributed by
+	// a correlation record that names Decision A.
+	CodeCorrelationDecisionMismatch FailureCode = "CORRELATION_DECISION_MISMATCH"
 
 	// Archive-level (Evidence Archive records: governed retrieval disclosures
 	// and sampled-object integrity verdicts, certification version 5+).

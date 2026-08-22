@@ -307,6 +307,14 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 //     entry_hash regardless of whether the field is present in the
 //     exported JSON.
 func canonicalizeForHash(raw []byte) ([]byte, error) {
+	// Reject duplicate top-level object keys BEFORE building the map: a
+	// duplicate key is a parser-differential hazard (RFC 8259 does not
+	// mandate first- vs last-value-wins), and building the map first would
+	// silently collapse it to Go's last-value-wins interpretation with no
+	// trace that a duplicate was ever present. See canonical.CheckNoDuplicateKeys.
+	if err := canonical.CheckNoDuplicateKeys(raw); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var m map[string]any

@@ -395,6 +395,527 @@ func TestUntrustedKey_NoKeystore(t *testing.T) {
 	}
 }
 
+// TestPermitBelongsToAnotherDecision is the regression lock for a real bug
+// found while hardening this corpus: a correlation record whose
+// permit_token_hash genuinely resolves to Decision d2, but whose declared
+// decision_id field claims d1 (a DIFFERENT, also-allow decision), was
+// accepted as fully valid — the validator never compared the resolved
+// Decision's own identity against the correlation's declared decision_id.
+// Confirmed via a proof-of-concept before the fix: OK()==true, zero
+// findings. Fixed by internal/envelope/correlation.go's new decision-binding
+// check (CORRELATION_DECISION_MISMATCH).
+func TestPermitBelongsToAnotherDecision(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	evals := []map[string]any{
+		mkEval("d1", "allow", "ph1", ""),
+		mkEval("d2", "allow", "ph2", ""),
+	}
+	ver1 := mkVer(map[string]any{"id": "ver-1", "decision_id": "d1", "permit_token_hash": "ph1"})
+	ver2 := mkVer(map[string]any{"id": "ver-2", "decision_id": "d2", "permit_token_hash": "ph2"})
+	// The correlation declares decision_id=d1, but its permit_token_hash
+	// (ph2) actually belongs to d2 — the "permit belonging to another
+	// decision" attack.
+	corr := mkCorr(map[string]any{"decision_id": "d1", "permit_token_hash": "ph2"})
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1", evals, []map[string]any{ver1, ver2}, []map[string]any{corr})
+
+	res, err := Verify(wire, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK() {
+		t.Fatal("a correlation whose permit belongs to a different decision than its declared decision_id must not be OK")
+	}
+	if !hasCode(res, CodeCorrelationDecisionMismatch) {
+		t.Fatalf("want CORRELATION_DECISION_MISMATCH; findings=%+v", res.Findings)
+	}
+	if res.CorrelationRecordsVerified != 0 {
+		t.Errorf("CorrelationRecordsVerified=%d, want 0", res.CorrelationRecordsVerified)
+	}
+}
+
+// TestPermitBelongsToAnotherDecision_ViaVerificationOnly exercises the same
+// bug via the permit-verification-only resolution path (no Decision anchor
+// in-export, only a permit-verification row) — the second branch the fix
+// added.
+func TestPermitBelongsToAnotherDecision_ViaVerificationOnly(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	ver1 := mkVer(map[string]any{"id": "ver-1", "decision_id": "d1", "permit_token_hash": "ph1"})
+	ver2 := mkVer(map[string]any{"id": "ver-2", "decision_id": "d2", "permit_token_hash": "ph2"})
+	corr := mkCorr(map[string]any{"decision_id": "d1", "permit_token_hash": "ph2"})
+	// No evaluations at all — only permit-verification rows resolve the reference.
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1", nil, []map[string]any{ver1, ver2}, []map[string]any{corr})
+
+	res, err := Verify(wire, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK() {
+		t.Fatal("must not be OK: permit resolves to a verification row for a different decision")
+	}
+	if !hasCode(res, CodeCorrelationDecisionMismatch) {
+		t.Fatalf("want CORRELATION_DECISION_MISMATCH; findings=%+v", res.Findings)
+	}
+}
+
+// TestCorrelationDecisionIDConsistentIsFine: the non-attack baseline for the
+// fix above — when decision_id and permit_token_hash genuinely agree on the
+// same Decision, verification must still succeed cleanly (no false positive
+// from the new check).
+func TestCorrelationDecisionIDConsistentIsFine(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")},
+		[]map[string]any{mkVer(nil)},
+		[]map[string]any{mkCorr(nil)}) // mkCorr defaults to decision_id=d1, permit=ph1 — consistent
+	res, err := Verify(wire, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK() {
+		t.Fatalf("consistent decision_id/permit_token_hash must verify cleanly; findings=%+v", res.Findings)
+	}
+	if hasCode(res, CodeCorrelationDecisionMismatch) {
+		t.Error("false positive: consistent reference fields flagged as a decision mismatch")
+	}
+}
+
+// TestEnvelopeInvalidBlocksLedgerAndCorrelationReporting is the core
+// composition-invariant test: when the outer envelope signature is invalid,
+// the ledger and correlation layers must NEVER be reported as "valid" —
+// they were never evaluated at all, because nothing under a broken outer
+// signature can be trusted enough to check. They must read "absent" (never
+// evaluated), not "invalid" (evaluated and failed) and never "valid". A
+// verifier that let a downstream layer read as passing merely because it
+// was never reached would be exactly the "some checks succeeded == artifact
+// valid" failure mode this corpus exists to rule out.
+func TestEnvelopeInvalidBlocksLedgerAndCorrelationReporting(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")},
+		[]map[string]any{mkVer(nil)},
+		[]map[string]any{mkCorr(nil)})
+	// Tamper a field that is part of the signed envelope but NOT re-signed —
+	// breaks the outer signature while every downstream record stays
+	// internally well-formed (ledger hash and correlation semantics would
+	// both pass IF they were ever checked).
+	tampered := []byte(strings.Replace(string(wire), `"org_id":"org-1"`, `"org_id":"org-1-tampered"`, 1))
+	if string(tampered) == string(wire) {
+		t.Fatal("tamper did not apply")
+	}
+
+	res, err := Verify(tampered, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EnvelopeIntegrity != LayerInvalid {
+		t.Fatalf("envelope integrity = %s, want invalid", res.EnvelopeIntegrity)
+	}
+	if res.OK() {
+		t.Fatal("result must not be OK when the envelope signature is invalid")
+	}
+	// The load-bearing assertions: downstream layers must be ABSENT
+	// (never evaluated), never VALID.
+	if res.LedgerIntegrity == LayerValid {
+		t.Error("ledger integrity must never read valid when the envelope signature failed — it was never checked")
+	}
+	if res.CorrelationIntegrity == LayerValid {
+		t.Error("correlation integrity must never read valid when the envelope signature failed — it was never checked")
+	}
+	if res.LedgerIntegrity != LayerAbsent {
+		t.Errorf("ledger integrity = %s, want absent (never evaluated, not evaluated-and-failed)", res.LedgerIntegrity)
+	}
+	if res.CorrelationIntegrity != LayerAbsent {
+		t.Errorf("correlation integrity = %s, want absent (never evaluated, not evaluated-and-failed)", res.CorrelationIntegrity)
+	}
+	if res.ArchiveIntegrity != LayerAbsent {
+		t.Errorf("archive integrity = %s, want absent (never evaluated)", res.ArchiveIntegrity)
+	}
+}
+
+// TestEnvelopeUnknownKidWithKeysSupplied: --keys IS supplied, but it names a
+// DIFFERENT kid than the envelope declares (simulating the real scenario
+// documented in atlasent-keys' STAGING_KEY_TRUST_POLICY.md — a staging
+// export's key_id is deliberately never published in the production trust
+// root). The embedded public_key_pem self-verifies, so the signature math
+// is sound, but trust is not externally anchored: this must read
+// verified_untrusted_key, pass normal OK(), and fail StrictOK(). This is
+// the "a valid staging/untrusted key presented as production-trusted
+// evidence" attack: running with a real --keys file must not let an
+// unrecognized (e.g. staging) key quietly pass as trusted.
+func TestEnvelopeUnknownKidWithKeysSupplied(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	otherPub, _, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "staging-kid-4d8b824fb0e827dc", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")}, nil, nil)
+
+	// The supplied trust root only knows a PRODUCTION kid — never the
+	// envelope's staging kid.
+	res, err := Verify(wire, memKeys{"prod-v2-audit-2026": otherPub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EnvelopeIntegrity != LayerUntrustedKey {
+		t.Fatalf("envelope integrity = %s, want valid_untrusted_key", res.EnvelopeIntegrity)
+	}
+	if !res.OK() {
+		t.Errorf("untrusted key must still be OK under normal acceptance; findings=%+v", res.Findings)
+	}
+	if ok, reason := res.StrictOK(); ok {
+		t.Errorf("an unrecognized kid must NEVER pass strict acceptance even with --keys supplied; reason=%q", reason)
+	}
+	if res.KeyTrusted {
+		t.Error("KeyTrusted must be false when the envelope's kid is absent from the supplied keystore")
+	}
+}
+
+// TestEnvelopeKnownKidWrongSignatureBytes: the envelope's key_id IS present
+// in the supplied trust root, but the signature bytes themselves are
+// corrupted (replaced with a well-formed, correctly-sized, but WRONG
+// Ed25519 signature) without re-signing. This is "known KID with wrong
+// signature" at the envelope layer, distinct from every existing envelope
+// tamper test (which corrupts a payload field and lets the resulting
+// signature mismatch fall out incidentally) — here the signature field
+// itself is the direct target.
+func TestEnvelopeKnownKidWrongSignatureBytes(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	_, otherPriv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")}, nil, nil)
+
+	var m map[string]any
+	if err := json.Unmarshal(wire, &m); err != nil {
+		t.Fatal(err)
+	}
+	// Replace the signature with a well-formed Ed25519 signature from a
+	// DIFFERENT key, over the SAME message — same length, valid base64,
+	// simply wrong.
+	delete(m, "signature")
+	unsigned, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := jcs.CanonicalizeRaw(unsigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongSig := ed25519.Sign(otherPriv, canon)
+	m["signature"] = base64.StdEncoding.EncodeToString(wrongSig)
+	tampered, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(tampered, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EnvelopeIntegrity != LayerInvalid {
+		t.Fatalf("envelope integrity = %s, want invalid", res.EnvelopeIntegrity)
+	}
+	if !hasCode(res, CodeEnvelopeSignatureInvalid) {
+		t.Fatalf("want ENVELOPE_SIGNATURE_INVALID; findings=%+v", res.Findings)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if strings.Contains(f.Detail, "does not verify against the trusted key") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the trusted-key-specific rejection message, got: %+v", res.Findings)
+	}
+}
+
+// TestEnvelopeUnsignedExport: the envelope carries an EMPTY signature field
+// — an unsigned export presented as evidence. Must be rejected outright,
+// with a message naming it as unsigned (not conflated with a decode error
+// or a mismatch against a real signature).
+func TestEnvelopeUnsignedExport(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")}, nil, nil)
+	var m map[string]any
+	if err := json.Unmarshal(wire, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["signature"] = ""
+	unsigned, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(unsigned, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK() {
+		t.Fatal("an unsigned export must never be OK")
+	}
+	if !hasCode(res, CodeEnvelopeSignatureInvalid) {
+		t.Fatalf("want ENVELOPE_SIGNATURE_INVALID; findings=%+v", res.Findings)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if strings.Contains(f.Detail, "unsigned export") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an 'unsigned export' message, got: %+v", res.Findings)
+	}
+	if ok, _ := res.StrictOK(); ok {
+		t.Error("unsigned export must not pass strict acceptance")
+	}
+}
+
+// TestEnvelopeRejectsDuplicateKey is the regression lock for the second
+// fix: the outer-signature recompute now rejects a duplicate top-level JSON
+// object key the same way the NDJSON chain hash path does (see
+// TestVerifyRejectsDuplicateKeyEntry in internal/chain), closing the same
+// parser-differential hazard at the envelope layer.
+func TestEnvelopeRejectsDuplicateKey(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")}, nil, nil)
+
+	// Insert a duplicate "org_id" key directly into the raw bytes (a
+	// map-based round trip would silently collapse it, so this is
+	// deliberately a raw string edit).
+	dup := strings.Replace(string(wire), `"org_id":"org-1"`, `"org_id":"org-1-DECOY","org_id":"org-1"`, 1)
+	if dup == string(wire) {
+		t.Fatal("replacement did not apply")
+	}
+
+	res, err := Verify([]byte(dup), memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK() {
+		t.Fatal("an envelope with a duplicate top-level key must not be OK")
+	}
+	if res.EnvelopeIntegrity != LayerInvalid {
+		t.Fatalf("envelope integrity = %s, want invalid", res.EnvelopeIntegrity)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if strings.Contains(f.Detail, "duplicate JSON object key") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a duplicate-object-key finding, got: %+v", res.Findings)
+	}
+}
+
+// TestEnvelopeUnknownAdditiveFieldBreaksSignatureIfUnsigned: injecting a
+// brand-new, never-signed top-level field into an otherwise-valid envelope
+// must break the outer signature — unlike the NDJSON chain's engine_version
+// (deliberately excluded from the hash by spec), the envelope's outer
+// signature has no such carve-out: EVERY top-level key present is part of
+// what gets canonicalized and signed. An unknown/additive field is only
+// ever safe when the producer included it before signing.
+func TestEnvelopeUnknownAdditiveFieldBreaksSignatureIfUnsigned(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")}, nil, nil)
+
+	var m map[string]any
+	if err := json.Unmarshal(wire, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["a_brand_new_field_the_verifier_has_never_seen"] = "injected-after-signing"
+	tampered, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(tampered, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK() {
+		t.Fatal("a post-hoc-injected additive field must break the outer signature")
+	}
+	if !hasCode(res, CodeEnvelopeSignatureInvalid) {
+		t.Fatalf("want ENVELOPE_SIGNATURE_INVALID; findings=%+v", res.Findings)
+	}
+}
+
+// TestEnvelopeUnknownAdditiveFieldAcceptedWhenSignedTogether is the
+// forward-compatibility counterpart: when the PRODUCER legitimately adds a
+// new field and signs the envelope WITH it present, verification must still
+// succeed — an unrecognized field the Envelope struct doesn't model is
+// simply ignored for decoding purposes, never treated as a failure by
+// itself. Signature coverage, not field allow-listing, is the trust
+// boundary.
+func TestEnvelopeUnknownAdditiveFieldAcceptedWhenSignedTogether(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	env := map[string]any{
+		"version":                           1,
+		"org_id":                            "org-1",
+		"key_id":                            "eks_test",
+		"public_key_pem":                    spkiPem(t, pub),
+		"generated_at":                      "2026-08-01T00:00:00.000Z",
+		"evaluations":                       toAnySlice([]map[string]any{mkEval("d1", "allow", "ph1", "")}),
+		"a_future_field_this_build_ignores": map[string]any{"nested": "value"},
+	}
+	unsigned, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := jcs.CanonicalizeRaw(unsigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canon))
+	wire, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(wire, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK() {
+		t.Fatalf("a legitimately-signed additive field must not fail verification; findings=%+v", res.Findings)
+	}
+}
+
+// TestCertificationCountMismatchAcrossSections extends the existing
+// TestCertificationCountMismatch (which only exercises retrieval_events) to
+// the evaluations and correlation_events census fields — distinct code
+// paths in checkCertificationCounts that were previously untested.
+func TestCertificationCountMismatchAcrossSections(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")},
+		[]map[string]any{mkVer(nil)},
+		[]map[string]any{mkCorr(nil)})
+	var m map[string]any
+	if err := json.Unmarshal(wire, &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m, "signature")
+	m["certification"] = map[string]any{
+		"version": 5,
+		"record_counts": map[string]any{
+			"evaluations":         3, // bundle carries 1
+			"correlation_events":  0, // bundle carries 1
+			"verification_events": 1,
+		},
+	}
+	unsigned, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := jcs.CanonicalizeRaw(unsigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canon))
+	resigned, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(resigned, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK() {
+		t.Fatal("a certification census that disagrees on evaluations/correlation counts must be reported")
+	}
+	evalMismatch, corrMismatch := false, false
+	for _, f := range res.Findings {
+		if f.Code != CodeCertificationCountMismatch {
+			continue
+		}
+		if f.Record == "evaluations" {
+			evalMismatch = true
+		}
+		if f.Record == "correlation_events" {
+			corrMismatch = true
+		}
+	}
+	if !evalMismatch {
+		t.Errorf("expected a CERTIFICATION_COUNT_MISMATCH for evaluations; findings=%+v", res.Findings)
+	}
+	if !corrMismatch {
+		t.Errorf("expected a CERTIFICATION_COUNT_MISMATCH for correlation_events; findings=%+v", res.Findings)
+	}
+}
+
+// TestEvaluationsRowDroppedAfterSigningBreaksOuterSignature: truncating the
+// PRIMARY ledger array (evaluations), not just the archive sections already
+// covered elsewhere, must break the outer signature — the quiet failure
+// mode an audit-chain export most needs to surface.
+func TestEvaluationsRowDroppedAfterSigningBreaksOuterSignature(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", ""), mkEval("d2", "allow", "ph2", "")}, nil, nil)
+
+	var m map[string]any
+	if err := json.Unmarshal(wire, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["evaluations"] = m["evaluations"].([]any)[:1] // drop d2 post-signing
+	truncated, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(truncated, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK() || !hasCode(res, CodeEnvelopeSignatureInvalid) {
+		t.Fatalf("truncated evaluations array undetected: %+v", res.Findings)
+	}
+}
+
+// TestCombinedMultiLayerFailure is the "combination attack" case: envelope
+// integrity is valid (correctly re-signed), but BOTH the ledger and
+// correlation layers independently fail for unrelated reasons in the same
+// bundle. Every distinct failure must be surfaced — a verifier that stopped
+// at the first bad layer, or that let one clean layer's PASS suppress
+// another layer's FAIL from the overall verdict, would misreport the
+// artifact.
+func TestCombinedMultiLayerFailure(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	badLedgerRow := mkEval("d1", "allow", "ph1", "")
+	badLedgerRow["canonical_payload"] = badLedgerRow["canonical_payload"].(string) + "TAMPER"
+	// A second, ledger-valid decision so the correlation below can resolve
+	// its permit reference and independently fail on ITS OWN defect
+	// (missing reference), unrelated to the ledger defect.
+	okRow := mkEval("d2", "allow", "ph2", "")
+	badCorr := mkCorr(map[string]any{"decision_id": "", "permit_token_hash": ""})
+
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{badLedgerRow, okRow}, nil, []map[string]any{badCorr})
+
+	res, err := Verify(wire, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EnvelopeIntegrity != LayerValid {
+		t.Fatalf("envelope must verify (re-signed): %s", res.EnvelopeIntegrity)
+	}
+	if res.OK() {
+		t.Fatal("a bundle with independent ledger AND correlation defects must not be OK")
+	}
+	if res.LedgerIntegrity != LayerInvalid || !hasCode(res, CodeLedgerHashMismatch) {
+		t.Errorf("want ledger invalid with LEDGER_HASH_MISMATCH; ledger=%s findings=%+v", res.LedgerIntegrity, res.Findings)
+	}
+	if res.CorrelationIntegrity != LayerInvalid || !hasCode(res, CodeCorrelationReferenceMissing) {
+		t.Errorf("want correlation invalid with CORRELATION_REFERENCE_MISSING; correlation=%s findings=%+v", res.CorrelationIntegrity, res.Findings)
+	}
+	// Both distinct failures must be present simultaneously, not just one.
+	if !(hasCode(res, CodeLedgerHashMismatch) && hasCode(res, CodeCorrelationReferenceMissing)) {
+		t.Fatalf("both independent failures must be reported together; findings=%+v", res.Findings)
+	}
+}
+
 // Ledger tampering: an altered canonical_payload breaks the ledger layer even
 // though (in this test) we re-sign so the envelope layer passes.
 func TestLedgerHashMismatch(t *testing.T) {

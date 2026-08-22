@@ -84,12 +84,21 @@ Machine-readable failure codes: `ENVELOPE_SIGNATURE_INVALID`,
 `UNSUPPORTED_ENVELOPE_VERSION`, `LEDGER_HASH_MISMATCH`, `LEDGER_CHAIN_BROKEN`,
 `CORRELATION_REFERENCE_MISSING`, `CORRELATION_REFERENCE_OUTSIDE_EXPORT`,
 `CORRELATION_ORG_MISMATCH`, `CORRELATION_ACTION_MISMATCH`,
-`CORRELATION_TARGET_MISMATCH`, `CORRELATION_LIFECYCLE_INVALID`,
+`CORRELATION_TARGET_MISMATCH`, `CORRELATION_DECISION_MISMATCH`,
+`CORRELATION_LIFECYCLE_INVALID`,
 `CORRELATION_DUPLICATE`, `CORRELATION_CONFLICT`,
 `ARCHIVE_REFERENCE_MISSING`, `ARCHIVE_REFERENCE_OUTSIDE_EXPORT`,
 `ARCHIVE_ORG_MISMATCH`, `ARCHIVE_DUPLICATE`, `ARCHIVE_CONFLICT`,
 `ARCHIVE_OUTCOME_UNKNOWN`, `UNSUPPORTED_CERTIFICATION_VERSION`,
 `CERTIFICATION_COUNT_MISMATCH`.
+
+`CORRELATION_DECISION_MISMATCH` (added alongside this hardening pass) fires
+when a correlation's declared `decision_id` disagrees with the Decision its
+own `permit_token_hash` actually resolves to in the export — i.e. the
+record's two reference fields point at two different decisions ("a permit
+belonging to another decision"). Distinct from
+`CORRELATION_REFERENCE_OUTSIDE_EXPORT`: here the reference DOES resolve,
+just to the wrong Decision.
 
 The `ARCHIVE_*` family is deliberately separate from `CORRELATION_*`: a
 consumer branching on codes must be able to tell "the post-execution

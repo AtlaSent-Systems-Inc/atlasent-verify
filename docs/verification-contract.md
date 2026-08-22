@@ -52,6 +52,32 @@ The CLI does not claim that:
 Those distinctions are intentional. Structural verification and policy judgment
 are different assurance layers.
 
+## Key trust and revocation
+
+`--keys` is a flat PEM file: `kid -> Ed25519 public key`, nothing more. It
+carries no revocation field, no validity window, and no distinction between
+a production key and any other key an operator happened to include.
+
+Revocation state (a `revoked` flag, and separately a revoked-KID list) is
+published by the trust root, not by this tool — see the AtlaSent public
+trust root's `.well-known/atlasent-verifier-keys.json` and
+`atlasent-revocations.json`. Because this verifier is offline by contract
+(see "Offline requirement" below), it never fetches that state itself:
+**it is the operator's responsibility to construct the `--keys` file only
+from currently-trusted, non-revoked entries.** A PEM file that still
+contains a since-revoked key will be treated as fully trusted by this tool
+— that is expected behavior given the offline design, not a defect, but it
+means revocation is enforced upstream of `--keys`, not by it.
+
+The same reasoning applies to keys the trust root deliberately never
+published — for example staging signing keys, which
+`atlasent-keys/docs/STAGING_KEY_TRUST_POLICY.md` documents as intentionally
+excluded. Running with a real (production) `--keys` file against a bundle
+signed by a key that file doesn't name correctly reports
+`verified_untrusted_key` (signature math sound, trust not externally
+anchored) rather than a false "trusted" pass — see
+`envelope.VerificationResult.StrictOK`.
+
 ## Offline requirement
 
 A normal verification run must not require:

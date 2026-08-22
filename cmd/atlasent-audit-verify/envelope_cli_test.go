@@ -144,6 +144,78 @@ func TestCLIEnvelopeTamperExit1(t *testing.T) {
 	}
 }
 
+// TestCLIEnvelopeUnsignedExits1: an envelope with an empty signature field
+// must exit 1 both with and without --require-signatures — an unsigned
+// export is not evidence under any acceptance mode.
+func TestCLIEnvelopeUnsignedExits1(t *testing.T) {
+	dir := t.TempDir()
+	envPath, keysPath, wire := writeSignedEnvelope(t, dir, "eks_test", false)
+	var m map[string]any
+	if err := json.Unmarshal(wire, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["signature"] = ""
+	unsigned, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envPath, unsigned, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := run(t, "--chain", envPath, "--keys", keysPath)
+	if code != 1 || !strings.Contains(out, "ENVELOPE_SIGNATURE_INVALID") {
+		t.Fatalf("unsigned envelope must exit 1 with ENVELOPE_SIGNATURE_INVALID, got %d\n%s", code, out)
+	}
+
+	out2, code2 := run(t, "--chain", envPath, "--keys", keysPath, "--require-signatures")
+	if code2 != 1 || !strings.Contains(out2, "NOT ACCEPTED") {
+		t.Fatalf("unsigned envelope under --require-signatures must be NOT ACCEPTED, got %d\n%s", code2, out2)
+	}
+}
+
+// TestCLIEnvelopeUnknownKidNotStrictAccepted: --keys is supplied but does
+// NOT contain the envelope's kid (the staging/untrusted-key scenario — see
+// atlasent-keys' STAGING_KEY_TRUST_POLICY.md). Non-strict: exit 0 with a
+// self-describing "embedded key" note. Strict: must NOT ACCEPT — a real
+// --keys file being present must never let an unrecognized kid quietly read
+// as trusted evidence.
+func TestCLIEnvelopeUnknownKidNotStrictAccepted(t *testing.T) {
+	dir := t.TempDir()
+	envPath, _, wire := writeSignedEnvelope(t, dir, "staging-4d8b824fb0e827dc", false)
+
+	// Build a --keys file naming a DIFFERENT (production-shaped) kid only.
+	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(otherPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type: "PUBLIC KEY", Headers: map[string]string{"kid": "v2-audit-2026"}, Bytes: der,
+	})
+	prodKeysPath := filepath.Join(dir, "prod-keys.pem")
+	if err := os.WriteFile(prodKeysPath, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = wire
+
+	out, code := run(t, "--chain", envPath, "--keys", prodKeysPath)
+	if code != 0 {
+		t.Fatalf("non-strict untrusted-key run should exit 0, got %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "embedded key") {
+		t.Errorf("expected the embedded-key trust note; out=%s", out)
+	}
+
+	out2, code2 := run(t, "--chain", envPath, "--keys", prodKeysPath, "--require-signatures")
+	if code2 != 1 || !strings.Contains(out2, "NOT ACCEPTED") {
+		t.Fatalf("an unrecognized kid must NOT ACCEPT under --require-signatures even with a real --keys file present, got %d\n%s", code2, out2)
+	}
+}
+
 func TestCLIEnvelopeJSONOutput(t *testing.T) {
 	dir := t.TempDir()
 	envPath, keysPath, _ := writeSignedEnvelope(t, dir, "eks_test", true)
