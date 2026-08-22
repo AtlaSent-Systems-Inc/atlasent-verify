@@ -7,6 +7,7 @@ package main
 // ACCEPTED/NOT ACCEPTED strict-acceptance lines were exercised by nothing.
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -182,6 +183,51 @@ func TestCLIStrictSkippedExits1(t *testing.T) {
 	}
 	if !strings.Contains(out, "NOT ACCEPTED (--require-signatures)") {
 		t.Errorf("missing NOT ACCEPTED line; out=%q", out)
+	}
+}
+
+// TestCLIUnsignedEntryExits1 writes a genesis entry with an EMPTY signature
+// field. Even WITHOUT --require-signatures, an unsigned entry against a
+// supplied keystore must be a hard finding (signature_invalid, not merely
+// skipped) and exit 1 — an empty signature is not "no key to check
+// against", it's a cryptographically invalid signature.
+func TestCLIUnsignedEntryExits1(t *testing.T) {
+	dir := t.TempDir()
+	chainPath, keysPath := writeSignedGenesis(t, dir, "k1", "k1")
+	raw, err := os.ReadFile(chainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	m["signature"] = ""
+	line, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chainPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := run(t, "--chain", chainPath, "--keys", keysPath)
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1; out=%s", code, out)
+	}
+	if !strings.Contains(out, "signature_invalid") {
+		t.Errorf("expected signature_invalid finding for an unsigned entry; out=%s", out)
+	}
+
+	// Under --require-signatures the same file must also exit 1. A hard
+	// signature_invalid finding takes the general findings/exit-1 path
+	// (the same as without --require-signatures) rather than the
+	// StrictSignatureAcceptance "NOT ACCEPTED" path, which is reserved for
+	// an otherwise-clean chain whose signatures were merely SKIPPED — an
+	// unsigned entry is a stronger, unconditional failure either way.
+	out2, code2 := run(t, "--chain", chainPath, "--keys", keysPath, "--require-signatures")
+	if code2 != 1 || !strings.Contains(out2, "signature_invalid") {
+		t.Errorf("want exit 1 with signature_invalid for an unsigned entry under --require-signatures, got %d\n%s", code2, out2)
 	}
 }
 

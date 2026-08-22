@@ -109,6 +109,32 @@ func validateCorrelations(env *Envelope, res *VerificationResult) (verified int,
 		}
 		resolvedPermit[i] = true // a Permit (Decision and/or verification) was resolved in-export
 
+		// (3-decision-binding) the correlation's OWN two reference fields must
+		// agree: permit_token_hash resolved a real Decision/verification above,
+		// but that resolution used permit_token_hash alone (decByPermit /
+		// verByPermit are keyed by it, tried first). A correlation can
+		// therefore carry a permit_token_hash that genuinely belongs to
+		// Decision B while its decision_id field claims Decision A — a
+		// forged or corrupted export could misattribute a real permit's
+		// evidence to a decision it was never issued for. Both dec.ID and
+		// ver.DecisionID are the canonical decision identity of whatever the
+		// permit hash actually resolved to; either disagreeing with the
+		// correlation's own declared decision_id is the mismatch.
+		if c.DecisionID != "" {
+			if hasDec && dec.ID != "" && dec.ID != c.DecisionID {
+				markFail(i, CodeCorrelationDecisionMismatch,
+					fmt.Sprintf("correlation declares decision_id=%q but its permit_token_hash=%q resolves to Decision id=%q in this export — the permit belongs to a different decision",
+						c.DecisionID, shortHash(c.PermitTokenHash), dec.ID))
+				continue
+			}
+			if !hasDec && hasVer && ver.DecisionID != "" && ver.DecisionID != c.DecisionID {
+				markFail(i, CodeCorrelationDecisionMismatch,
+					fmt.Sprintf("correlation declares decision_id=%q but its permit_token_hash=%q resolves to a permit-verification for Decision id=%q — the permit belongs to a different decision",
+						c.DecisionID, shortHash(c.PermitTokenHash), ver.DecisionID))
+				continue
+			}
+		}
+
 		// (4-lifecycle) permit -> execution -> observation -> correlation.
 		// A correlation asserts an execution was observed. That is only
 		// coherent if the referenced Decision issued a permit (decision=allow).

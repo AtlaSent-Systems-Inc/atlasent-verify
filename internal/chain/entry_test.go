@@ -360,6 +360,304 @@ func TestVerifyDetectsMalformedSignature(t *testing.T) {
 	}
 }
 
+// TestVerifyDetectsWrongPreviousHash: e2's previous_hash is corrupted to a
+// value that doesn't match e1's entry_hash (but is otherwise well-formed
+// 64-char hex). This is the "wrong previous hash" attack: hash continuity
+// must catch it as a chain_break, distinct from a hash_mismatch (e2's own
+// entry_hash is internally self-consistent with its own payload+prevHash;
+// what's wrong is the LINK to the prior entry). Processing for this org
+// must stop at the break — no further entries chain off a broken parent.
+func TestVerifyDetectsWrongPreviousHash(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+	realPrev := mustEntryHash(t, e1)
+	e2 := buildEntry(t, realPrev, 2, sk, map[string]any{"k": "v2"})
+
+	// Corrupt e2's previous_hash to a plausible-looking but WRONG value.
+	wrongPrev := strings.Repeat("ab", 32)
+	var m map[string]any
+	if err := json.Unmarshal(e2, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["previous_hash"] = wrongPrev
+	e2Bad, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chain := append(append([]byte{}, e1...), '\n')
+	chain = append(chain, e2Bad...)
+
+	res, err := Verify(bytes.NewReader(chain), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasKindChain(res, "chain_break") {
+		t.Fatalf("expected chain_break finding for wrong previous_hash, got: %+v", res.Findings)
+	}
+	// The break must stop that org's processing: no head recorded past e1.
+	if res.HeadByOrg["org-1"] != 1 {
+		t.Errorf("HeadByOrg[org-1]=%d, want 1 (processing must stop at the break)", res.HeadByOrg["org-1"])
+	}
+}
+
+// TestVerifyDetectsReorderedEntries writes three validly-chained entries out
+// of causal order (e1, e3, e2). e3 arriving when sequence 2 is expected must
+// be flagged as an ordering violation; the correctly-ordered e2 that follows
+// must still be accepted against the still-valid prior state (e3 having been
+// rejected without advancing it).
+func TestVerifyDetectsReorderedEntries(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+	prev1 := mustEntryHash(t, e1)
+	e2 := buildEntry(t, prev1, 2, sk, map[string]any{"k": "v2"})
+	prev2 := mustEntryHash(t, e2)
+	e3 := buildEntry(t, prev2, 3, sk, map[string]any{"k": "v3"})
+
+	// Reordered: e1, e3, e2.
+	reordered := bytes.Join([][]byte{e1, e3, e2}, []byte{'\n'})
+	res, err := Verify(bytes.NewReader(reordered), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasKindChain(res, "ordering") {
+		t.Fatalf("expected an ordering finding for the out-of-order entry, got: %+v", res.Findings)
+	}
+	// The rejected out-of-order line must not silently become the accepted
+	// head — e2 (correctly ordered, arriving third) should still verify
+	// against e1's state and become the accepted head at sequence 2.
+	if res.HeadByOrg["org-1"] != 2 {
+		t.Errorf("HeadByOrg[org-1]=%d, want 2 (e3 rejected, e2 accepted after it)", res.HeadByOrg["org-1"])
+	}
+}
+
+// TestVerifyDetectsDuplicateSequence: the same sequence number appears
+// twice for an org. The second occurrence must be flagged as an ordering
+// violation (it is not the expected next sequence), regardless of whether
+// its payload differs from the first.
+func TestVerifyDetectsDuplicateSequence(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+	prev1 := mustEntryHash(t, e1)
+	e2 := buildEntry(t, prev1, 2, sk, map[string]any{"k": "v2"})
+	// A second, DIFFERENT entry also claiming sequence 2, chained (falsely)
+	// off e2's hash rather than e1's — the duplicate-sequence attack.
+	prev2 := mustEntryHash(t, e2)
+	e2dup := buildEntry(t, prev2, 2, sk, map[string]any{"k": "v2-duplicate-claim"})
+
+	chain := bytes.Join([][]byte{e1, e2, e2dup}, []byte{'\n'})
+	res, err := Verify(bytes.NewReader(chain), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.Kind == "ordering" && strings.Contains(f.Detail, "expected sequence 3, got 2") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected ordering finding for duplicate sequence 2, got: %+v", res.Findings)
+	}
+	// The accepted head must remain at the FIRST (legitimate) sequence-2
+	// entry, not silently advance past the duplicate.
+	if res.HeadByOrg["org-1"] != 2 {
+		t.Errorf("HeadByOrg[org-1]=%d, want 2", res.HeadByOrg["org-1"])
+	}
+}
+
+// TestVerifyDetectsHashFieldTamperedSignatureUnchanged: only the stored
+// entry_hash STRING is corrupted (payload, previous_hash, and signature are
+// all untouched from a legitimately-signed entry). Because entry_hash is
+// excluded from the canonicalized/hashed bytes, the recomputed hash is
+// unaffected — the finding must come from the literal-value comparison
+// against the (now wrong) stored entry_hash, and the corrupt entry must
+// never reach signature verification (SignaturesVerified must stay 0 for
+// it) since the code path continues past a hash_mismatch.
+func TestVerifyDetectsHashFieldTamperedSignatureUnchanged(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+
+	var m map[string]any
+	if err := json.Unmarshal(e1, &m); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt ONLY the entry_hash field's text — a different well-formed
+	// 64-hex value. Signature is untouched; it was computed over the
+	// ORIGINAL (correct) hash bytes, not this corrupted string.
+	m["entry_hash"] = strings.Repeat("9", 64)
+	e1Bad, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(bytes.NewReader(e1Bad), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasKindChain(res, "hash_mismatch") {
+		t.Fatalf("expected hash_mismatch for a corrupted entry_hash field, got: %+v", res.Findings)
+	}
+	if res.SignaturesVerified != 0 {
+		t.Errorf("SignaturesVerified=%d, want 0 (the tampered entry must not reach signature verification)", res.SignaturesVerified)
+	}
+}
+
+// TestVerifyRejectsDuplicateKeyEntry is the regression lock for the fix:
+// canonicalizeForHash (the real hash-verification hot path) now rejects a
+// duplicate top-level JSON object key the same way canonical.FromJSON
+// always has, closing a parser-differential gap where this verifier's
+// last-value-wins map decode could "verify" a hash that a first-value-wins
+// reader of the identical bytes would attribute to different content.
+// Confirmed as a real gap before this fix (see the PR description).
+func TestVerifyRejectsDuplicateKeyEntry(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+
+	entry := map[string]any{
+		"chain_version": json.Number("5"),
+		"org_id":        "org-1",
+		"sequence":      json.Number("1"),
+		"event_type":    "test.event",
+		"actor_id":      "actor-real",
+		"payload":       map[string]any{"k": "v1"},
+		"previous_hash": hex.EncodeToString(zeros),
+		"key_version":   "k1",
+	}
+	canonBytes, err := canonical.Bytes(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	h.Write(zeros)
+	h.Write(canonBytes)
+	hash := h.Sum(nil)
+	entryHash := hex.EncodeToString(hash)
+	sig := "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(sk, hash))
+
+	// Hand-crafted raw bytes: "actor_id" appears TWICE. entry_hash/signature
+	// are computed for the LAST-value-wins interpretation ("actor-real"),
+	// exactly what this verifier's map decode would silently accept without
+	// the fix — while a first-value-wins reader would see "actor-DECOY".
+	raw := []byte(`{"chain_version":5,"org_id":"org-1","sequence":1,"event_type":"test.event",` +
+		`"actor_id":"actor-DECOY-a-different-parser-might-read-first",` +
+		`"actor_id":"actor-real","payload":{"k":"v1"},` +
+		`"previous_hash":"` + hex.EncodeToString(zeros) + `",` +
+		`"key_version":"k1","entry_hash":"` + entryHash + `","signature":"` + sig + `"}`)
+
+	res, err := Verify(bytes.NewReader(raw), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.Kind == "canonical_form" && strings.Contains(f.Detail, "duplicate object key") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a canonical_form/duplicate-object-key finding, got: %+v", res.Findings)
+	}
+	if res.SignaturesVerified != 0 {
+		t.Errorf("SignaturesVerified=%d, want 0 (a rejected duplicate-key entry must never reach signature verification)", res.SignaturesVerified)
+	}
+}
+
+// TestVerifyRejectsOldChainVersion: a chain_version below MinChainVersion
+// (5) must be a hard finding (chain_version_unsupported), never silently
+// interpreted under the current canonical form. Previously untested.
+func TestVerifyRejectsOldChainVersion(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+	var m map[string]any
+	if err := json.Unmarshal(e1, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["chain_version"] = json.Number("4")
+	e1Old, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(bytes.NewReader(e1Old), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasKindChain(res, "chain_version_unsupported") {
+		t.Fatalf("expected chain_version_unsupported finding, got: %+v", res.Findings)
+	}
+	if res.HeadByOrg["org-1"] != 0 {
+		t.Errorf("an unsupported-version entry must not become an accepted head")
+	}
+}
+
+// TestVerifyRejectsUnsignedEntry: an entry with an EMPTY signature field
+// (distinct from a malformed one) must be rejected once a keystore is
+// supplied — an empty string base64-decodes trivially to zero bytes, which
+// must fail ed25519.Verify rather than being silently treated as "no
+// signature to check". Under --require-signatures (StrictSignatureAcceptance)
+// this must also reject: an integrity finding is present.
+func TestVerifyRejectsUnsignedEntry(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntry(t, zeros, 1, sk, map[string]any{"k": "v1"})
+	var m map[string]any
+	if err := json.Unmarshal(e1, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["signature"] = ""
+	e1Unsigned, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(bytes.NewReader(e1Unsigned), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasKindChain(res, "signature_invalid") {
+		t.Fatalf("expected signature_invalid for an empty signature field, got: %+v", res.Findings)
+	}
+	if ok, _ := res.StrictSignatureAcceptance(true); ok {
+		t.Error("strict acceptance must reject a chain carrying an unsigned entry")
+	}
+}
+
+func hasKindChain(res *Result, kind string) bool {
+	for _, f := range res.Findings {
+		if f.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
 func mustEntryHash(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var m map[string]any
