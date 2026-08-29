@@ -103,6 +103,7 @@ jobs:
       # against its own known-good inputs.
       # ----------------------------------------------------------------
       - name: Verify correctness against golden fixtures
+        id: golden
         run: |
           go test -race -count=1 ./...
           echo "::notice::Golden fixture verification PASSED."
@@ -141,17 +142,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/released
-          cd /tmp/released
+          # Run from the checkout (a real git repo) and use --dir instead of
+          # `cd`ing into /tmp/released first — `gh` infers owner/repo from the
+          # git remote in the current directory, and a bare `cd` into a
+          # non-git tmp dir made every `gh release download` fail with
+          # "fatal: not a git repository", cascading into three
+          # false-failure downstream checks that never got real artifacts to
+          # verify (root cause of the canary's 2026-08-10/17/24 failures).
           gh release download "${{ steps.release.outputs.tag }}" \
+            --dir /tmp/released \
             --pattern 'atlasent-audit-verify-*-linux-amd64' \
             --pattern 'atlasent-audit-verify-*-linux-amd64.sig' \
             --pattern 'atlasent-audit-verify-*-linux-amd64.pem' \
             --pattern 'CHECKSUMS.txt' \
             --pattern 'CHECKSUMS.txt.sig' \
             --pattern 'CHECKSUMS.txt.pem'
-          ls -la
+          ls -la /tmp/released
 
       - name: Verify released binary signature (cosign keyless)
+        id: verify_binary
         if: steps.release.outputs.skip != 'true'
         working-directory: /tmp/released
         run: |
@@ -170,6 +179,7 @@ jobs:
           echo "::notice::Trust-chain check PASSED for $BIN (release ${{ steps.release.outputs.tag }})"
 
       - name: Verify CHECKSUMS.txt signature
+        id: verify_checksums
         if: steps.release.outputs.skip != 'true'
         working-directory: /tmp/released
         run: |
@@ -190,6 +200,7 @@ jobs:
       # and reports its own version.
       # ----------------------------------------------------------------
       - name: Smoke-test the released binary
+        id: smoke
         if: steps.release.outputs.skip != 'true'
         working-directory: /tmp/released
         run: |
@@ -217,9 +228,9 @@ jobs:
           ## Steps executed
 
           - Source build (current main): ${{ steps.build.outcome }}
-          - Golden-fixture verification: ${{ job.status }}
-          - Trust-chain verification: ${{ steps.release.outputs.skip == 'true' && 'skipped (no release tag yet)' || job.status }}
-          - Released-binary smoke test: ${{ steps.release.outputs.skip == 'true' && 'skipped' || job.status }}
+          - Golden-fixture verification: ${{ steps.golden.outcome }}
+          - Trust-chain verification: ${{ steps.release.outputs.skip == 'true' && 'skipped (no release tag yet)' || (steps.verify_binary.outcome == 'success' && steps.verify_checksums.outcome == 'success' && 'success' || format('binary={0} checksums={1}', steps.verify_binary.outcome, steps.verify_checksums.outcome)) }}
+          - Released-binary smoke test: ${{ steps.release.outputs.skip == 'true' && 'skipped' || steps.smoke.outcome }}
 
           ## Release verified (if any)
 
