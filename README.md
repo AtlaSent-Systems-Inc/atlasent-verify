@@ -1,8 +1,6 @@
 # atlasent-audit-verify
 
-Standalone, source-open CLI for independently validating AtlaSent audit-chain
-exports — with **no AtlaSent runtime cooperation, no network calls, and no
-database access**.
+Standalone, source-open CLI that independently validates an AtlaSent audit-chain export.
 
 This repository contains the verifier source, its tests, signed release workflow,
 and the public verification contract. A customer, auditor, or security reviewer
