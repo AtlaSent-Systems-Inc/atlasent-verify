@@ -774,6 +774,156 @@ func TestVerifyEngineVersionAdditive(t *testing.T) {
 	}
 }
 
+// buildEntryWithEngineVersion mints a v5 entry exactly like buildEntry, but
+// engine_version is set BEFORE canonicalizing/hashing when includeInHash is
+// true — i.e. it recomputes the hash the CURRENT producer
+// (_shared/audit-v5-projection.ts::buildV5EntryForHash) actually emits when
+// the row carries the field. When includeInHash is false, engine_version is
+// injected into the JSON AFTER the hash was computed without it — the LEGACY
+// form this verifier originally (and still, as a fallback) supports.
+func buildEntryWithEngineVersion(t *testing.T, prevHash []byte, seq int64, sk ed25519.PrivateKey, payload map[string]any, engineVersion string, includeInHash bool) []byte {
+	t.Helper()
+	prevHex := hex.EncodeToString(prevHash)
+	entry := map[string]any{
+		"chain_version": json.Number("5"),
+		"org_id":        "org-1",
+		"sequence":      json.Number(itoa(seq)),
+		"event_type":    "test.event",
+		"actor_id":      "actor-1",
+		"payload":       payload,
+		"previous_hash": prevHex,
+		"key_version":   "k1",
+	}
+	if includeInHash {
+		entry["engine_version"] = engineVersion
+	}
+	canonBytes, err := canonical.Bytes(entry)
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	h := sha256.New()
+	h.Write(prevHash)
+	h.Write(canonBytes)
+	hash := h.Sum(nil)
+	entry["entry_hash"] = hex.EncodeToString(hash)
+	entry["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(sk, hash))
+	if !includeInHash {
+		// Inject AFTER hashing/signing — additive metadata under the legacy
+		// exclude-form contract: present on the wire, not a hash input.
+		entry["engine_version"] = engineVersion
+	}
+	out, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return out
+}
+
+// TestVerifyEngineVersionCurrentProducerForm checks that an entry hashed the
+// way the CURRENT producer does (_shared/audit-v5-projection.ts::
+// buildV5EntryForHash includes engine_version in the hashed object whenever
+// the row carries one — atlasent-verify#28) verifies cleanly on the PRIMARY
+// hash form, with no warning: this is the expected, ordinary case going
+// forward, not a fallback.
+func TestVerifyEngineVersionCurrentProducerForm(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntryWithEngineVersion(t, zeros, 1, sk, map[string]any{"k": "v1"}, "wire-v1@1.0.0", true)
+
+	res, err := Verify(bytes.NewReader(e1), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Findings) != 0 {
+		t.Fatalf("current-producer-form entry must verify on the primary hash; got findings: %+v", res.Findings)
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("current-producer-form entry must NOT need the legacy fallback; got warnings: %+v", res.Warnings)
+	}
+	if res.EntriesScanned != 1 {
+		t.Errorf("scanned=%d, want 1", res.EntriesScanned)
+	}
+}
+
+// TestVerifyEngineVersionLegacyFallbackWarns checks that an entry hashed
+// under the LEGACY engine_version-excluded form still verifies (no finding),
+// but ONLY via the fallback — and that the fallback is surfaced as a warning,
+// not silently indistinguishable from a normal current-producer-form match.
+// This is the acceptance-criteria requirement that the fallback "must be
+// surfaced/covered by tests."
+func TestVerifyEngineVersionLegacyFallbackWarns(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntryWithEngineVersion(t, zeros, 1, sk, map[string]any{"k": "v1"}, "wire-v1@1.0.0", false)
+
+	res, err := Verify(bytes.NewReader(e1), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Findings) != 0 {
+		t.Fatalf("legacy-form entry must still verify via fallback; got findings: %+v", res.Findings)
+	}
+	if len(res.Warnings) != 1 {
+		t.Fatalf("legacy-form entry must surface exactly one fallback warning; got %+v", res.Warnings)
+	}
+	if res.Warnings[0].Kind != "engine_version_legacy_hash_form" {
+		t.Errorf("warning kind = %q, want engine_version_legacy_hash_form", res.Warnings[0].Kind)
+	}
+	if res.SignaturesVerified != 1 {
+		t.Errorf("signatures_verified = %d, want 1 — the signature must still check out against the matched (legacy) digest", res.SignaturesVerified)
+	}
+	if res.EntriesScanned != 1 {
+		t.Errorf("scanned=%d, want 1", res.EntriesScanned)
+	}
+}
+
+// TestVerifyEngineVersionNeitherFormMatchesIsAFinding proves the fallback is
+// NOT an arbitrary alternate hash accepted on faith: an entry_hash that
+// matches neither the current-producer form nor the legacy excluded form
+// (e.g. the payload was tampered with after signing) must still be a real
+// hash_mismatch finding, exit 1 — never silently waved through because "some
+// engine_version form might explain it."
+func TestVerifyEngineVersionNeitherFormMatchesIsAFinding(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+	e1 := buildEntryWithEngineVersion(t, zeros, 1, sk, map[string]any{"k": "v1"}, "wire-v1@1.0.0", true)
+
+	var m map[string]any
+	if err := json.Unmarshal(e1, &m); err != nil {
+		t.Fatal(err)
+	}
+	// Tamper with the payload after hashing/signing. Neither hash form can
+	// possibly match now.
+	m["payload"] = map[string]any{"k": "tampered"}
+	tampered, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Verify(bytes.NewReader(tampered), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Findings) != 1 {
+		t.Fatalf("want exactly one hash_mismatch finding, got %+v", res.Findings)
+	}
+	if res.Findings[0].Kind != "hash_mismatch" {
+		t.Errorf("finding kind = %q, want hash_mismatch", res.Findings[0].Kind)
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("a real mismatch must not also emit a legacy-fallback warning; got %+v", res.Warnings)
+	}
+}
+
 // TestVerifyUnknownKeyVersionWarns checks that an entry whose key_version
 // is not present in the keystore produces a warning (not a finding).  The
 // hash chain is still verified; only signature verification is skipped.

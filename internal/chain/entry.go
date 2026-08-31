@@ -219,9 +219,28 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 		}
 
 		// Recompute entry_hash:
-		//   canonical_payload = canonicalize(entry without entry_hash + signature)
+		//   canonical_payload = canonicalize(entry without entry_hash + signature [+ engine_version])
 		//   entry_hash = lowercase_hex(SHA-256(prev_hash_bytes || canonical_payload))
-		canonBytes, err := canonicalizeForHash(raw)
+		//
+		// Two hash forms exist because of a real producer/verifier divergence
+		// (atlasent-verify#28): _shared/audit-v5-projection.ts::buildV5EntryForHash
+		// includes engine_version in the hashed entry object whenever the
+		// projected row carries one (see v1-export-audit-stream, the deployed
+		// caller), while this verifier's original — and still spec-documented —
+		// behavior excludes it. An entry with no engine_version hashes
+		// identically either way, so this only matters for entries that carry
+		// the field, and every other chain is completely unaffected.
+		//
+		// Primary: the CURRENT producer form (engine_version included when
+		// present) — canonicalizeForHash(raw, true). Fallback: the LEGACY
+		// engine_version-excluded form, attempted ONLY when engine_version is
+		// present AND the primary form failed to match. This is not an
+		// arbitrary alternate hash accepted on faith: it is the one other form
+		// this codebase has ever documented producing, and using it is always
+		// surfaced as a warning (see below) so a chain that needed it is
+		// auditable, never silently indistinguishable from one that matched on
+		// the first, current-producer try.
+		primaryCanon, err := canonicalizeForHash(raw, true)
 		if err != nil {
 			res.Findings = append(res.Findings, Finding{
 				LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
@@ -231,18 +250,42 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 		}
 		h := sha256.New()
 		h.Write(st.prevHashBytes)
-		h.Write(canonBytes)
+		h.Write(primaryCanon)
 		gotHash := h.Sum(nil)
 		gotHashHex := hex.EncodeToString(gotHash)
+
+		usedLegacyEngineVersionForm := false
+		if gotHashHex != e.EntryHash && e.EngineVersion != nil {
+			if legacyCanon, legacyErr := canonicalizeForHash(raw, false); legacyErr == nil {
+				h2 := sha256.New()
+				h2.Write(st.prevHashBytes)
+				h2.Write(legacyCanon)
+				legacyHash := h2.Sum(nil)
+				legacyHashHex := hex.EncodeToString(legacyHash)
+				if legacyHashHex == e.EntryHash {
+					gotHash = legacyHash
+					gotHashHex = legacyHashHex
+					usedLegacyEngineVersionForm = true
+				}
+			}
+		}
 
 		if gotHashHex != e.EntryHash {
 			res.Findings = append(res.Findings, Finding{
 				LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
 				Kind: "hash_mismatch",
-				Detail: fmt.Sprintf("expected entry_hash %s, recomputed %s",
+				Detail: fmt.Sprintf("expected entry_hash %s, recomputed %s (checked both the current engine_version-included producer form and, since engine_version is present, the legacy excluded form)",
 					e.EntryHash, gotHashHex),
 			})
 			continue
+		}
+
+		if usedLegacyEngineVersionForm {
+			res.Warnings = append(res.Warnings, Finding{
+				LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
+				Kind:   "engine_version_legacy_hash_form",
+				Detail: "entry_hash verified only via the LEGACY engine_version-EXCLUDED hash form; the current producer form (engine_version included) did not match. This entry was produced under the prior additive/excluded behavior, not the current producer (atlasent-verify#28).",
+			})
 		}
 
 		// Verify signature over the raw 32-byte entry_hash digest.
@@ -297,16 +340,27 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 // canonicalizeForHash strips the fields that are excluded from the
 // chain hash, then canonicalizes the remainder.
 //
-// Per the canonical-form spec (v5):
+// "entry_hash" and "signature" are ALWAYS removed — they are the hash and its
+// proof, never inputs to it.
 //
-//   - "entry_hash" and "signature" are always removed (they are the
-//     hash and its proof, not inputs to it).
-//   - "engine_version" is additive metadata — it was NOT included in
-//     the hash when the runtime produced the entry.  Removing it here
-//     keeps the verifier's recomputed hash consistent with the stored
-//     entry_hash regardless of whether the field is present in the
-//     exported JSON.
-func canonicalizeForHash(raw []byte) ([]byte, error) {
+// keepEngineVersion selects which of the two documented hash forms this call
+// recomputes for "engine_version":
+//
+//   - true (current producer form): engine_version is left in the map to be
+//     hashed. _shared/audit-v5-projection.ts::buildV5EntryForHash includes
+//     engine_version in the projected entry whenever the underlying row
+//     carries one (v1-export-audit-stream is the deployed caller) — this is
+//     the form a fresh export actually produces (atlasent-verify#28).
+//   - false (legacy form): engine_version is removed before hashing, matching
+//     this verifier's original behavior and the audit-chain v5 spec's stated
+//     design ("engine_version is additive metadata, not a hash input"). Kept
+//     so entries produced under that prior behavior — before the producer
+//     started folding the field into the hash — still verify.
+//
+// An entry with no engine_version field hashes identically under both modes
+// (deleting an absent key is a no-op), so this only affects entries that
+// actually carry the field; every other chain is unaffected by the parameter.
+func canonicalizeForHash(raw []byte, keepEngineVersion bool) ([]byte, error) {
 	// Reject duplicate top-level object keys BEFORE building the map: a
 	// duplicate key is a parser-differential hazard (RFC 8259 does not
 	// mandate first- vs last-value-wins), and building the map first would
@@ -323,6 +377,8 @@ func canonicalizeForHash(raw []byte) ([]byte, error) {
 	}
 	delete(m, "entry_hash")
 	delete(m, "signature")
-	delete(m, "engine_version") // additive metadata — not in chain hash (audit chain v5)
+	if !keepEngineVersion {
+		delete(m, "engine_version")
+	}
 	return canonical.Bytes(m)
 }

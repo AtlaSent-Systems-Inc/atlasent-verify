@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/chain"
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/envelope"
@@ -222,6 +223,28 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 		fmt.Fprintf(os.Stdout, "    └─ %-22s %s\n", "Retention", retentionLine(res))
 	}
 
+	// Certified-copy (21 CFR Part 11 §11.10(b)/(c)) summary. Only printed when
+	// the bundle actually carries a certification manifest — an uncertified
+	// export is a normal, valid export and prints nothing extra. "OK" here
+	// means every certification-level check passed: the record-count census
+	// AND the bundle_sha256 recompute (checkCertificationCounts /
+	// checkCertificationBundleHash) — a count match alone is not enough to
+	// call a copy byte-accurate. When the outer envelope signature itself is
+	// invalid, Verify returns before either of those checks ever runs (a
+	// certification manifest rides the same signature as every other
+	// section), so this is reported as FAIL too — never a false "OK" for a
+	// completeness check that was never actually performed.
+	if res.CertificationVersion > 0 {
+		switch {
+		case res.EnvelopeIntegrity == envelope.LayerInvalid:
+			fmt.Fprintf(os.Stdout, "[FAIL] Certified copy (v%d) — outer envelope signature invalid; completeness was not checked\n", res.CertificationVersion)
+		case hasCertificationFinding(res):
+			fmt.Fprintf(os.Stdout, "[FAIL] Certified copy (v%d) — completeness/accuracy check failed (see findings below)\n", res.CertificationVersion)
+		default:
+			fmt.Fprintf(os.Stdout, "[OK  ] Certified copy (v%d) — record counts + bundle_sha256 verified\n", res.CertificationVersion)
+		}
+	}
+
 	for _, f := range res.Findings {
 		if f.Record != "" {
 			fmt.Fprintf(os.Stdout, "  ! %s [%s]: %s\n", f.Code, f.Record, f.Detail)
@@ -239,6 +262,19 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 	} else {
 		fmt.Fprintf(os.Stderr, "\nfound %d issue(s)\n", len(res.Findings))
 	}
+}
+
+// hasCertificationFinding reports whether any finding is a certification-
+// level failure (record-count census mismatch, bundle_sha256 mismatch, or an
+// unsupported certification version). Matched by code prefix rather than an
+// exhaustive list so a future CERTIFICATION_* code is picked up automatically.
+func hasCertificationFinding(res *envelope.VerificationResult) bool {
+	for _, f := range res.Findings {
+		if strings.HasPrefix(string(f.Code), "CERTIFICATION_") {
+			return true
+		}
+	}
+	return false
 }
 
 // retentionLine states exactly what this tool can say about retention, and no
