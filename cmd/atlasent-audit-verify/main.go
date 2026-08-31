@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/chain"
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/envelope"
@@ -220,6 +221,22 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 		// including when zero of them carry retention metadata, so nobody
 		// reads a green archive line as a retention guarantee.
 		fmt.Fprintf(os.Stdout, "    └─ %-22s %s\n", "Retention", retentionLine(res))
+	}
+
+	// ADR-052 spec stamp. Printed with an explicit "declared by the producer"
+	// label and no verdict marker, because this tool checks none of it — the
+	// outer signature proves the bytes were not altered, not that the producer
+	// conformed to the revision it names. A bundle without the stamp prints
+	// nothing here, exactly as before the stamp existed.
+	if res.AuditChainSpec != nil {
+		s := res.AuditChainSpec
+		fmt.Fprintf(os.Stdout,
+			"[--] Audit-chain spec — DECLARED BY PRODUCER, not verified by this tool: %s@%s (%s), protection: %s\n",
+			s.SpecID, s.SpecVersion, s.ADR, res.AuditChainSpecProtection)
+		if len(s.EvaluationChainVersions) > 0 {
+			fmt.Fprintf(os.Stdout, "    └─ %-22s %s (declared; not re-derived from the rows)\n",
+				"Chain versions", strings.Join(s.EvaluationChainVersions, ", "))
+		}
 	}
 
 	for _, f := range res.Findings {

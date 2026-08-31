@@ -167,6 +167,40 @@ the arrays present (`CERTIFICATION_COUNT_MISMATCH`) — only for sections the
 manifest actually declares, so an older manifest is not treated as claiming
 zero.
 
+#### ADR-052 spec stamp — echoed, never checked
+
+An envelope may carry a top-level `audit_chain_spec`
+(`{spec_id, spec_version, adr, evaluation_chain_versions}`) — the ADR-052
+provenance stamp naming which revision of
+`atlasent-docs/architecture/audit-chain-v1-spec.md` the **producer** claims to
+have conformed to. It is emitted by `atlasent-api`'s `v1-export-audit`.
+
+Three rules, all load-bearing:
+
+- **It is a producer claim, not a verification result.** A verified outer
+  signature proves these bytes are the bytes the producer signed; it does not
+  prove the producer conformed to the revision it names, and this tool checks
+  none of it. The CLI prints it labelled `DECLARED BY PRODUCER, not verified by
+  this tool`, and `evaluation_chain_versions` is echoed as declared — **not**
+  re-derived from `evaluations[]`, so a green run does not rule out a mismatch
+  between that list and the rows.
+- **Absence is a clean pass, permanently.** Every bundle exported before the
+  stamp existed has no `audit_chain_spec`, and its `--json` output is
+  byte-identical to what it was before this field was added (both new keys are
+  `omitempty`). This is the same backward-compatibility contract the pre-v5
+  archive sections get.
+- **There is deliberately NO version gate on it.** Unlike
+  `certification.version` — which gates because it selects the recompute
+  formula — this field selects nothing, so no value of it can fail a bundle or
+  relax one. **Do not add a ceiling, a finding, or a branch that varies
+  verification behaviour on it**: a self-described spec version that could
+  switch verification paths would let a producer choose how strictly it is
+  checked. The stamp is echoed only after the outer signature verifies; an
+  unauthenticated stamp is not surfaced at all.
+
+None of this is a canonical-form change: `entry_hash`, `canonical_payload`, and
+the v5 export projection are untouched.
+
 Committed deterministic fixtures live in `cmd/atlasent-audit-verify/testdata/`
 (`archive-export.json`, signed once under a fixed key; the trusted keyfile is
 derived from the fixture at test time because `.gitignore` blanket-ignores

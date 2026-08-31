@@ -128,6 +128,22 @@ func Verify(raw []byte, keys chain.KeyStore) (*VerificationResult, error) {
 		return res, nil
 	}
 
+	// (1b) ADR-052 spec stamp — echoed, never checked.
+	//
+	// Placed AFTER the signature check on purpose, for the same reason the
+	// correlation layer is: a broken outer signature means nothing carried
+	// under it can be trusted, so an unauthenticated stamp is not worth
+	// surfacing. Reaching here means the signature verified (against a trusted
+	// key, or — reported honestly as such — against the embedded one).
+	//
+	// Nothing below can produce a finding, alter a layer verdict, or select a
+	// verification path. A pre-stamp bundle leaves both fields unset and its
+	// output is byte-identical to what it was before this existed.
+	if env.AuditChainSpec != nil {
+		res.AuditChainSpec = env.AuditChainSpec
+		res.AuditChainSpecProtection = "outer_envelope_signature"
+	}
+
 	// (2) Ledger — evaluations[] entry-hash chain.
 	ledgerVerified, ledgerLayer := verifyLedger(&env, res)
 	res.LedgerIntegrity = ledgerLayer

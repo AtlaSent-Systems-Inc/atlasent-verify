@@ -298,6 +298,20 @@ type VerificationResult struct {
 	// certification manifest is present (0 when absent).
 	CertificationVersion int `json:"certification_version,omitempty"`
 
+	// AuditChainSpec echoes the bundle's ADR-052 spec stamp when one is
+	// present AND the outer signature verified. INFORMATIONAL ONLY — it is a
+	// producer claim this verifier does not check (see AuditChainSpec).
+	//
+	// Omitted entirely when the bundle carries no stamp, so a pre-stamp bundle
+	// produces byte-identical --json output to what it produced before this
+	// field existed. Its absence is never a finding and never a downgrade.
+	AuditChainSpec *AuditChainSpec `json:"audit_chain_spec,omitempty"`
+
+	// AuditChainSpecProtection names WHAT protects the stamp — the outer
+	// envelope signature, exactly like the correlation and archive sections.
+	// Set only alongside AuditChainSpec.
+	AuditChainSpecProtection string `json:"audit_chain_spec_protection,omitempty"`
+
 	// KeyID is the envelope's declared signing key id (echoed for the reader).
 	KeyID string `json:"key_id,omitempty"`
 	// KeyTrusted is true when the outer signature verified against a key
@@ -371,6 +385,48 @@ type Envelope struct {
 	// Certification is the certified-copy manifest when the export requested
 	// one. Optional: an uncertified bundle is a normal, valid export.
 	Certification *Certification `json:"certification"`
+
+	// AuditChainSpec is the ADR-052 spec-document provenance stamp, present
+	// only on bundles produced after atlasent-api started emitting it.
+	//
+	// OPTIONAL AND UNGATED, deliberately. Absence is the normal state for
+	// every bundle produced before the stamp existed and must remain a clean
+	// pass forever — this verifier's backward-compatibility contract. Presence
+	// is reported and nothing more: there is NO version ceiling here and no
+	// value of this field can make a bundle fail, because the verifier does
+	// not check any of the claims it makes.
+	AuditChainSpec *AuditChainSpec `json:"audit_chain_spec"`
+}
+
+// AuditChainSpec mirrors the ADR-052 stamp emitted by
+// atlasent-api's _shared/audit-chain-spec.ts.
+//
+// ─── WHAT THIS IS, EXACTLY ───────────────────────────────────────────────────
+//
+// A PRODUCER CLAIM, carried under the outer envelope signature.
+//
+// A verified outer signature proves these bytes are the bytes the producer
+// signed — it does NOT prove the producer conformed to the specification
+// revision it names, and this verifier performs no check that it did. That
+// would require comparing the runtime's hash formulas against a document,
+// which is not something an offline CLI reading one bundle can do.
+//
+// So: report it, attribute it, and claim nothing further. In particular this
+// field must never be used to relax, skip, or select a verification path — a
+// self-described spec version that could switch verification behaviour would
+// let a producer choose how strictly it is checked.
+type AuditChainSpec struct {
+	// SpecID identifies the specification document (e.g. "audit-chain-v1-spec").
+	SpecID string `json:"spec_id"`
+	// SpecVersion is the document revision the PRODUCER claims to conform to.
+	SpecVersion string `json:"spec_version"`
+	// ADR is the decision record that made the document canonical ("ADR-052").
+	ADR string `json:"adr"`
+	// EvaluationChainVersions are the ADR-052 chain identifiers the producer
+	// says are present in evaluations[]. Echoed as declared; this verifier does
+	// NOT re-derive them from the rows, so a mismatch between this list and the
+	// rows is not something a green result rules out.
+	EvaluationChainVersions []string `json:"evaluation_chain_versions"`
 }
 
 // Certification mirrors the certified-copy manifest emitted by
