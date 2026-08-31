@@ -3,8 +3,10 @@ package envelope
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -91,6 +93,7 @@ func Verify(raw []byte, keys chain.KeyStore) (*VerificationResult, error) {
 	res.KeyID = env.KeyID
 	res.CorrelationRecordsTotal = len(env.Correlations)
 	res.ArchiveRecordsTotal = len(env.Retrievals) + len(env.Probes)
+	res.ProtectionConfigurationsTotal = len(env.ProtectionConfigurations)
 
 	// (0) Version gate — fail closed on an unknown envelope shape.
 	if env.Version != SupportedEnvelopeVersion {
@@ -180,6 +183,12 @@ func Verify(raw []byte, keys chain.KeyStore) (*VerificationResult, error) {
 	// which the reader must be told.
 	checkCertificationCounts(&env, res)
 
+	// (6) Certification bundle-hash cross-check. A count match does not prove
+	// byte-accuracy — a row edited in place without changing an array's
+	// length would pass the census above and still be a materially different
+	// copy from what was certified. Recomputing bundle_sha256 catches that.
+	checkCertificationBundleHash(raw, &env, res)
+
 	return res, nil
 }
 
@@ -196,6 +205,7 @@ func checkCertificationCounts(env *Envelope, res *VerificationResult) {
 		if claimed == nil {
 			return
 		}
+		res.CertificationCountsChecked = append(res.CertificationCountsChecked, name)
 		if *claimed != actual {
 			res.AddFinding(CodeCertificationCountMismatch, name,
 				fmt.Sprintf("certification manifest claims %d %s record(s) but the bundle carries %d", *claimed, name, actual))
@@ -206,6 +216,105 @@ func checkCertificationCounts(env *Envelope, res *VerificationResult) {
 	cmp("correlation_events", rc.CorrelationEvents, len(env.Correlations))
 	cmp("retrieval_events", rc.RetrievalEvents, len(env.Retrievals))
 	cmp("probe_events", rc.ProbeEvents, len(env.Probes))
+	cmp("protection_configurations", rc.ProtectionConfigurations, len(env.ProtectionConfigurations))
+}
+
+// certificationBundleSectionsV5 are the exact JSON keys _shared/certified-
+// copy.ts::computeBundleSha256 canonicalizes and hashes together for
+// certification versions 5 and earlier (the shape has been stable at these 9
+// keys since the module's introduction — see atlasent-api CLAUDE.md's
+// certified-copy.ts version history). Order does not matter: jcs.Canonicalize
+// sorts object keys itself.
+var certificationBundleSectionsV5 = []string{
+	"evaluations", "context_envelopes", "governance_transitions", "admin_log",
+	"verification_events", "exception_events", "correlation_events",
+	"retrieval_events", "probe_events",
+}
+
+// certificationBundleSectionsV6 additionally hashes protection_configurations
+// (H14 Protection Continuity manifests) — the 10th key, added when
+// CERTIFICATION_VERSION became 6.
+var certificationBundleSectionsV6 = append(append([]string{}, certificationBundleSectionsV5...), "protection_configurations")
+
+// checkCertificationBundleHash recomputes certification.bundle_sha256 from
+// the EXACT raw record-section bytes this bundle carries — not this
+// package's typed decode of verification/correlation/archive rows used
+// elsewhere, which models only the fields those validators consult and would
+// silently drop everything else on re-serialization, manufacturing a false
+// mismatch against a genuinely byte-accurate copy. See
+// _shared/certified-copy.ts::computeBundleSha256, whose material object this
+// mirrors key-for-key.
+//
+// The material shape is chosen by the MANIFEST's own declared version, never
+// by this build's SupportedCertificationVersion ceiling: a genuine v5 bundle
+// must keep verifying under a verifier that also understands v6, and a v6
+// bundle must be checked against the 10-key shape v5 never had.
+//
+// Skipped (no finding) when the manifest carries no bundle_sha256 at all —
+// the same tolerance checkCertificationCounts applies to record_counts fields
+// an older or hand-built manifest never populated.
+func checkCertificationBundleHash(raw []byte, env *Envelope, res *VerificationResult) {
+	if env.Certification == nil || env.Certification.BundleSha256 == "" {
+		return
+	}
+	res.CertificationBundleHashChecked = true
+
+	// A second, independent raw decode of the whole envelope, keyed by JSON
+	// field name. This is deliberate: the typed Envelope fields for
+	// verification/correlation/retrieval/probe rows only capture the subset
+	// of columns this package's semantic validators need, and re-marshaling
+	// those structs would silently omit every other real wire field a
+	// producer emits — corrupting the very bytes this check exists to
+	// reproduce exactly. Decoding a fresh map[string]json.RawMessage instead
+	// preserves each section's byte-identical original array contents.
+	var rawSections map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rawSections); err != nil {
+		// Unreachable in practice: raw already decoded successfully into
+		// Envelope above. Report rather than panic.
+		res.AddFinding(CodeCertificationBundleHashMismatch, "",
+			"could not re-parse the envelope to recompute bundle_sha256: "+err.Error())
+		return
+	}
+
+	sections := certificationBundleSectionsV5
+	if env.Certification.Version >= 6 {
+		sections = certificationBundleSectionsV6
+	}
+
+	material := make(map[string]json.RawMessage, len(sections))
+	for _, key := range sections {
+		v, ok := rawSections[key]
+		trimmed := bytes.TrimSpace(v)
+		if !ok || len(trimmed) == 0 || string(trimmed) == "null" {
+			// Matches the producer's own `?? []` default: a section omitted
+			// from the wire (empty array, never serialized) still
+			// contributes an empty array to the hashed material, not a
+			// missing key.
+			material[key] = json.RawMessage("[]")
+			continue
+		}
+		material[key] = v
+	}
+
+	materialBytes, err := json.Marshal(material)
+	if err != nil {
+		res.AddFinding(CodeCertificationBundleHashMismatch, "",
+			"could not serialize record sections to recompute bundle_sha256: "+err.Error())
+		return
+	}
+	canonBytes, err := jcs.CanonicalizeRaw(materialBytes)
+	if err != nil {
+		res.AddFinding(CodeCertificationBundleHashMismatch, "",
+			"could not canonicalize record sections to recompute bundle_sha256: "+err.Error())
+		return
+	}
+	sum := sha256.Sum256(canonBytes)
+	got := hex.EncodeToString(sum[:])
+	if got != env.Certification.BundleSha256 {
+		res.AddFinding(CodeCertificationBundleHashMismatch, "",
+			fmt.Sprintf("certification manifest declares bundle_sha256=%s but recomputing over the certification v%d record sections yields %s — the copy is not a byte-accurate match for what was certified",
+				env.Certification.BundleSha256, env.Certification.Version, got))
+	}
 }
 
 // VerifyNDJSONLedgerOnly wraps the legacy NDJSON path so the CLI can present a

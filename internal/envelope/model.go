@@ -72,6 +72,13 @@ const (
 	// Certification-level.
 	CodeUnsupportedCertificationVersion FailureCode = "UNSUPPORTED_CERTIFICATION_VERSION"
 	CodeCertificationCountMismatch      FailureCode = "CERTIFICATION_COUNT_MISMATCH"
+	// CodeCertificationBundleHashMismatch fires when the manifest's declared
+	// bundle_sha256 does not match the hash recomputed from this bundle's own
+	// record sections. Distinct from CodeCertificationCountMismatch: a count
+	// match does not prove byte-accuracy — a row could be edited in place
+	// without changing an array's length, and only the hash recompute catches
+	// that. See checkCertificationBundleHash.
+	CodeCertificationBundleHashMismatch FailureCode = "CERTIFICATION_BUNDLE_HASH_MISMATCH"
 )
 
 // SupportedEnvelopeVersion is the only envelope `version` this verifier
@@ -80,12 +87,21 @@ const (
 const SupportedEnvelopeVersion = 1
 
 // SupportedCertificationVersion is the highest certified-copy manifest version
-// this verifier understands. A LOWER version is accepted unchanged — v1–v4
-// bundles predate the Evidence Archive sections and verify exactly as they did
-// before, which is the backward-compatibility contract. A HIGHER version fails
-// closed: a newer producer may bind sections this build cannot see, and
-// silently ignoring them would report a partial check as a complete one.
-const SupportedCertificationVersion = 5
+// this verifier understands. A LOWER version is accepted unchanged — v1–v5
+// bundles predate the H14 Protection Continuity manifests (v6) and verify
+// exactly as they did before, which is the backward-compatibility contract. A
+// HIGHER version fails closed: a newer producer may bind sections this build
+// cannot see, and silently ignoring them would report a partial check as a
+// complete one.
+//
+// v6 (_shared/certified-copy.ts, atlasent-verify#28) adds
+// protection_configurations to both the record_counts census and the
+// bundle_sha256 material — v5 and earlier never had that key in the hashed
+// object at all. checkCertificationBundleHash picks the correct material
+// shape from the MANIFEST's own declared version, never from this constant,
+// so a genuine v5 bundle keeps verifying under a build that also understands
+// v6.
+const SupportedCertificationVersion = 6
 
 // Layer is a per-layer verdict in the 3-layer VerificationResult.
 type Layer string
@@ -298,6 +314,26 @@ type VerificationResult struct {
 	// certification manifest is present (0 when absent).
 	CertificationVersion int `json:"certification_version,omitempty"`
 
+	// ProtectionConfigurationsTotal is the number of H14 Protection
+	// Continuity manifest records present in the bundle (certification
+	// version 6+). Cross-checked against the certification manifest's own
+	// census by checkCertificationCounts; no separate semantic-validation
+	// layer exists for this section (see Envelope.ProtectionConfigurations).
+	ProtectionConfigurationsTotal int `json:"protection_configurations_total,omitempty"`
+
+	// CertificationBundleHashChecked is true only when checkCertificationBundleHash
+	// actually recomputed and compared bundle_sha256 — false when the manifest
+	// declared no bundle_sha256 at all and the check was skipped (atlasent-verify#28
+	// follow-up: a skipped check must never be reported as a verified one).
+	CertificationBundleHashChecked bool `json:"certification_bundle_hash_checked,omitempty"`
+
+	// CertificationCountsChecked names the record-count sections the manifest
+	// actually declared a claimed count for (and that checkCertificationCounts
+	// therefore compared) — e.g. ["evaluations", "correlation_events"]. A section
+	// absent from this list had no claimed count in the manifest and was never
+	// checked, not a section that was checked and passed.
+	CertificationCountsChecked []string `json:"certification_counts_checked,omitempty"`
+
 	// KeyID is the envelope's declared signing key id (echoed for the reader).
 	KeyID string `json:"key_id,omitempty"`
 	// KeyTrusted is true when the outer signature verified against a key
@@ -368,6 +404,15 @@ type Envelope struct {
 	Retrievals []RetrievalRow `json:"retrieval_events"`
 	Probes     []ProbeRow     `json:"probe_events"`
 
+	// ProtectionConfigurations mirrors export_protection_configurations
+	// (H14 secret-free Protection Continuity manifests), added at
+	// certification version 6. Held as raw JSON — this layer only cross-checks
+	// the certified COUNT (see checkCertificationCounts); it does not run a
+	// semantic validator the way correlation/archive records do, so no typed
+	// shape is needed. Absent on every earlier bundle, exactly like the
+	// Evidence Archive sections were before v5.
+	ProtectionConfigurations []json.RawMessage `json:"protection_configurations"`
+
 	// Certification is the certified-copy manifest when the export requested
 	// one. Optional: an uncertified bundle is a normal, valid export.
 	Certification *Certification `json:"certification"`
@@ -380,6 +425,14 @@ type Envelope struct {
 type Certification struct {
 	Version      int                       `json:"version"`
 	RecordCounts CertificationRecordCounts `json:"record_counts"`
+	// BundleSha256 is the producer's fingerprint over the canonicalized
+	// record sections (computeBundleSha256 in _shared/certified-copy.ts).
+	// Recomputed and cross-checked by checkCertificationBundleHash. A blank
+	// value (a manifest that never populated the field, e.g. an older
+	// hand-built fixture) skips the hash check entirely — the same tolerance
+	// checkCertificationCounts applies to absent count fields — rather than
+	// treating "field absent" as "hash is the empty string".
+	BundleSha256 string `json:"bundle_sha256"`
 }
 
 // CertificationRecordCounts is the manifest's per-section census. The verifier
@@ -392,6 +445,10 @@ type CertificationRecordCounts struct {
 	CorrelationEvents  *int `json:"correlation_events"`
 	RetrievalEvents    *int `json:"retrieval_events"`
 	ProbeEvents        *int `json:"probe_events"`
+	// ProtectionConfigurations was added at certification version 6. A v5-or-
+	// earlier manifest simply has no such key (nil pointer, not a claim of
+	// zero) — mirrors how RetrievalEvents/ProbeEvents were nil before v5.
+	ProtectionConfigurations *int `json:"protection_configurations"`
 }
 
 // RetrievalRow mirrors export_retrieval_events_rows — one governed DISCLOSURE

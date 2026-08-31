@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/chain"
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/envelope"
@@ -222,6 +223,32 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 		fmt.Fprintf(os.Stdout, "    └─ %-22s %s\n", "Retention", retentionLine(res))
 	}
 
+	// Certified-copy (21 CFR Part 11 §11.10(b)/(c)) summary. Only printed when
+	// the bundle actually carries a certification manifest — an uncertified
+	// export is a normal, valid export and prints nothing extra. "OK" here
+	// means every certification-level check that ran actually passed. It does
+	// NOT mean every possible check ran: a manifest may omit bundle_sha256 or
+	// individual record_counts fields (tolerated for older/hand-built
+	// manifests — see checkCertificationCounts/checkCertificationBundleHash),
+	// and a skipped check must never be reported as a verified one
+	// (atlasent-verify#28 follow-up) — the summary line below names exactly
+	// what was checked and calls out anything that was declared-absent and
+	// therefore skipped. When the outer envelope signature itself is
+	// invalid, Verify returns before any certification check ever runs (a
+	// certification manifest rides the same signature as every other
+	// section), so this is reported as FAIL too — never a false "OK" for a
+	// completeness check that was never actually performed.
+	if res.CertificationVersion > 0 {
+		switch {
+		case res.EnvelopeIntegrity == envelope.LayerInvalid:
+			fmt.Fprintf(os.Stdout, "[FAIL] Certified copy (v%d) — outer envelope signature invalid; completeness was not checked\n", res.CertificationVersion)
+		case hasCertificationFinding(res):
+			fmt.Fprintf(os.Stdout, "[FAIL] Certified copy (v%d) — completeness/accuracy check failed (see findings below)\n", res.CertificationVersion)
+		default:
+			fmt.Fprintf(os.Stdout, "[OK  ] Certified copy (v%d) — %s\n", res.CertificationVersion, certificationSummaryDetail(res))
+		}
+	}
+
 	for _, f := range res.Findings {
 		if f.Record != "" {
 			fmt.Fprintf(os.Stdout, "  ! %s [%s]: %s\n", f.Code, f.Record, f.Detail)
@@ -239,6 +266,55 @@ func printEnvelopeHuman(res *envelope.VerificationResult) {
 	} else {
 		fmt.Fprintf(os.Stderr, "\nfound %d issue(s)\n", len(res.Findings))
 	}
+}
+
+// hasCertificationFinding reports whether any finding is a certification-
+// level failure (record-count census mismatch, bundle_sha256 mismatch, or an
+// unsupported certification version). Matched by code prefix rather than an
+// exhaustive list so a future CERTIFICATION_* code is picked up automatically.
+func hasCertificationFinding(res *envelope.VerificationResult) bool {
+	for _, f := range res.Findings {
+		if strings.HasPrefix(string(f.Code), "CERTIFICATION_") {
+			return true
+		}
+	}
+	return false
+}
+
+// allCertificationCountSections is every record_counts field
+// checkCertificationCounts knows how to compare, in report order. Used only
+// to say how many of the possible sections were actually declared/checked —
+// not every bundle carries all of them (an older manifest has no
+// protection_configurations count at all, for example).
+var allCertificationCountSections = []string{
+	"evaluations", "verification_events", "correlation_events",
+	"retrieval_events", "probe_events", "protection_configurations",
+}
+
+// certificationSummaryDetail builds the OK-line detail for a certification
+// manifest with no findings. It must never claim a check ran when it was
+// actually skipped because the manifest declared no value for it
+// (atlasent-verify#28 follow-up: a skipped check is not a verified one).
+func certificationSummaryDetail(res *envelope.VerificationResult) string {
+	checked := len(res.CertificationCountsChecked)
+	total := len(allCertificationCountSections)
+	var countsPart string
+	if checked == total {
+		countsPart = "record counts verified"
+	} else if checked == 0 {
+		countsPart = "record counts not declared, not checked"
+	} else {
+		countsPart = fmt.Sprintf("record counts verified for %d/%d declared section(s)", checked, total)
+	}
+
+	var hashPart string
+	if res.CertificationBundleHashChecked {
+		hashPart = "bundle_sha256 verified"
+	} else {
+		hashPart = "bundle_sha256 not declared, not checked"
+	}
+
+	return countsPart + "; " + hashPart
 }
 
 // retentionLine states exactly what this tool can say about retention, and no
