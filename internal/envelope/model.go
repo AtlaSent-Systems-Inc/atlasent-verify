@@ -371,6 +371,24 @@ type Envelope struct {
 	// Certification is the certified-copy manifest when the export requested
 	// one. Optional: an uncertified bundle is a normal, valid export.
 	Certification *Certification `json:"certification"`
+
+	// ReconciliationScope declares that this export opts into cross-runtime
+	// reconciliation (ADR CROSS-043). Optional and additive: absence means
+	// "not opted in" — the default, zero-behavior-change state for every
+	// existing export, and single-envelope verification (this file) never
+	// reads it. Only internal/reconcile, given TWO already-verified
+	// envelopes, consults it.
+	ReconciliationScope *ReconciliationScope `json:"reconciliation_scope"`
+}
+
+// ReconciliationScope is the ADR CROSS-043 wire contract's one new field: a
+// customer-declared (never AtlaSent-derived or inferred) opaque identifier for
+// the logical deployment this export belongs to. Two exports are only ever
+// compared when both declare the SAME deployment_id and the same org_id
+// (checked by internal/reconcile, not here) — this struct just carries the
+// declaration.
+type ReconciliationScope struct {
+	DeploymentID string `json:"deployment_id"`
 }
 
 // Certification mirrors the certified-copy manifest emitted by
@@ -463,6 +481,21 @@ type VerificationRow struct {
 	PresentedPayloadHash string `json:"presented_payload_hash"`
 	Outcome              string `json:"outcome"`
 	OrganizationID       string `json:"organization_id"` // optional; present only once the producer surfaces it
+	// VerifiedAt is when THIS verification attempt was recorded (real column
+	// on export_verification_events_rows, atlasent-api migration
+	// 20260714000000). Not consulted by correlation/archive today; added for
+	// internal/reconcile.
+	VerifiedAt string `json:"verified_at"`
+	// RevokedAt is populated ONLY when Outcome == "revoked": the real
+	// permit_revocations.revoked_at moment (ADR CROSS-043 §2) —
+	// deliberately NOT VerifiedAt, which records when a rejected
+	// PRESENTATION was attempted (may be long after the real revocation, or
+	// never happen at all). Absent/empty for every other outcome and for
+	// every export produced before this field existed.
+	// internal/reconcile's post-revocation-validity check compares against
+	// this field and refuses (never approximates from VerifiedAt) when it is
+	// missing on a revoked row it needs.
+	RevokedAt string `json:"revoked_at"`
 }
 
 // CorrelationRow mirrors export_correlation_events_rows (the post-execution

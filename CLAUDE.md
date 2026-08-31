@@ -39,7 +39,7 @@ single JSON object carrying `public_key_pem`/`evaluations` and no
    folded into the per-row `entry_hash` chain (ADR-020 offline-verifier parity;
    ADR-048 single evidence ledger).
 
-### Envelope verification is 4 independent layers
+### Envelope verification is 4 independent layers (plus a 5th, cross-envelope reconciliation layer — see below)
 
 `internal/envelope` produces a `VerificationResult` with four verdicts —
 `envelope_integrity`, `ledger_integrity`, `correlation_integrity`,
@@ -90,7 +90,12 @@ Machine-readable failure codes: `ENVELOPE_SIGNATURE_INVALID`,
 `ARCHIVE_REFERENCE_MISSING`, `ARCHIVE_REFERENCE_OUTSIDE_EXPORT`,
 `ARCHIVE_ORG_MISMATCH`, `ARCHIVE_DUPLICATE`, `ARCHIVE_CONFLICT`,
 `ARCHIVE_OUTCOME_UNKNOWN`, `UNSUPPORTED_CERTIFICATION_VERSION`,
-`CERTIFICATION_COUNT_MISMATCH`.
+`CERTIFICATION_COUNT_MISMATCH`. The fifth, cross-envelope reconciliation
+layer (ADR CROSS-043, `--reconcile-with`) registers its own separate family —
+`RECONCILIATION_SCOPE_MISMATCH`, `CROSS_RUNTIME_DUPLICATE_CONSUMPTION`,
+`CROSS_RUNTIME_POST_REVOCATION_VALIDITY`,
+`RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE` — documented in full in
+"Cross-runtime reconciliation" below.
 
 `CORRELATION_DECISION_MISMATCH` (added alongside this hardening pass) fires
 when a correlation's declared `decision_id` disagrees with the Decision its
@@ -174,6 +179,117 @@ derived from the fixture at test time because `.gitignore` blanket-ignores
 canonicalization or the wire shape ever drifts, the committed signature stops
 verifying and the drift surfaces in CI rather than in a customer's audit.
 
+### Cross-runtime reconciliation (ADR CROSS-043) — the fifth layer, run across TWO envelopes
+
+`internal/reconcile` implements ADR CROSS-043 ("Cross-runtime reconciliation
+— wire contract for independently-operated runtime instances"), reachable via
+the `--reconcile-with <path>` CLI flag. It is a **fifth, additive** offline
+verification layer, alongside (never replacing) envelope / ledger /
+correlation / archive — but unlike those four, it runs **across two signed
+export envelopes**, not within one. Two independently-operated runtime
+instances (self-hosted, SaaS, a future regional-edge instance) that a
+customer declares to be part of the same **logical deployment** can each
+produce a signed export; reconciliation asks whether they agree about
+something that matters even though each is independently, perfectly valid.
+
+```bash
+# Both files are independently verified first (unchanged behavior), THEN
+# reconciled. '-' (stdin) is not accepted for --reconcile-with — stdin can
+# supply only one file; use --chain - for the piped input.
+atlasent-audit-verify --chain a.json --keys keys.pem --reconcile-with b.json
+```
+
+**Ordering and non-authority (do not weaken either):** each envelope is
+verified in full by the existing four layers BEFORE reconciliation ever
+runs, and reconciliation's result never mutates, invalidates, or overrides
+either side's own `envelope_integrity` / `ledger_integrity` /
+`correlation_integrity` / `archive_integrity` verdict — it is a separate,
+additive `reconciliation_integrity` verdict. Per ADR CROSS-043 §5
+(mirroring CROSS-038's evidence-not-authority framing), a reconciliation
+finding — including `CROSS_RUNTIME_DUPLICATE_CONSUMPTION`, which sounds
+urgent — is evidence for a human auditor, never wired into any live
+`/v1-evaluate` or `/v1-verify-permit` decision.
+
+**Wire contract — two new, additive, optional fields**, neither read by
+single-envelope verification:
+
+- `reconciliation_scope.deployment_id` (top-level envelope field) —
+  customer-declared, opaque, not AtlaSent-issued. Absence means "not opted
+  into cross-runtime reconciliation" — the default, zero-behavior-change
+  state for every existing export.
+- `verification_events[].revoked_at` — populated **only** when
+  `outcome == "revoked"`: the real `permit_revocations.revoked_at` moment.
+  Deliberately **not** `verified_at`, which records when a rejected
+  *re-presentation* was attempted — that can postdate the real revocation by
+  an arbitrary amount, or never happen at all. An earlier draft of ADR
+  CROSS-043 compared against `verified_at`; caught and corrected by review
+  before this package was implemented (see the ADR's §1/§2).
+
+**The scope-match gate runs before any record-level comparison.** Refused
+(`RECONCILIATION_SCOPE_MISMATCH`, verdict `refused`) unless both envelopes
+declare the **same** `org_id` **and** the same
+`reconciliation_scope.deployment_id`. Either envelope lacking
+`reconciliation_scope` entirely is *also* a refusal — never a silent skip,
+never "compare anyway." This is checked and enforced even when the two
+exports share an overlapping, doubly-consumed permit that would otherwise be
+a finding: scope mismatch always wins.
+
+**Once scope matches**, reconciliation indexes each export's
+`verification_events[]` by `permit_token_hash` (an existing record type — no
+new one) and compares the overlap:
+
+- **`CROSS_RUNTIME_DUPLICATE_CONSUMPTION`** — the same `permit_token_hash`
+  is `outcome: verified` (the CCAM outcome enum's successful-consume value —
+  there is no `valid` outcome value; the CHECK constraint on
+  `verification_events.outcome` is
+  `verified/mismatch/expired/revoked/replay_blocked/invalid`) in **both**
+  exports. Each instance individually enforces single-use correctly (checked
+  independently, elsewhere); this asks whether the *same* permit was
+  independently and successfully consumed at two different enforcement
+  points.
+- **`CROSS_RUNTIME_POST_REVOCATION_VALIDITY`** — a permit is `outcome:
+  verified` in one export at a timestamp *after* the **other** export's real
+  `revoked_at` for the same `permit_token_hash`. Revocation-propagation lag
+  made visible, not resolved — this reports; it never revokes, retracts, or
+  pushes state between instances.
+- **`RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE`** — the
+  `outcome: revoked` row for a permit under comparison carries no usable
+  `revoked_at` (the revoking export predates the field, or the value is
+  malformed). Refused for that specific pair — **never silently skipped and
+  never approximated from `verified_at`**, even when `verified_at` is
+  present on the same row.
+- **`absent`** (a SUCCESS, not an error) — both exports verify
+  independently, scopes match, but there is **no** overlapping
+  `permit_token_hash` at all: the expected steady state for two
+  correctly-operating, disjoint instances. Exactly the posture the
+  correlation/archive layers already use for their own zero-record
+  `absent` states.
+- An overlap with no finding is `verified` — something was actually
+  compared and came out clean, distinct from `absent` (nothing to compare).
+
+`reconciliation_integrity` — `verified` / `invalid` / `absent` / `refused` —
+is reported as a **fifth** line in `--json` output, alongside a `deployment_id`
+/ `org_id` echo (once scope matches) and `overlapping_permit_token_hashes`.
+Because reconciliation spans two files, `--json` output for a
+`--reconcile-with` run wraps both sides' independent `VerificationResult`s
+plus the reconciliation `Result`: `{"a": {...}, "b": {...}, "reconciliation":
+{...}}` — the single-file `--json` shape (used whenever `--reconcile-with` is
+absent) is completely unchanged.
+
+**V1 scope, deliberately narrow (do not silently expand):** strictly
+pairwise (no N-way topology), no live network path, no discovery mechanism
+(both files are operator-supplied), no automatic remediation of anything
+found. `--reconcile-with` requires `--chain` (and the second file) to be
+envelope-shaped — reconciliation compares `verification_events[]` across two
+envelopes, not the legacy per-row NDJSON chain.
+
+Committed deterministic fixtures: `cmd/atlasent-audit-verify/testdata/
+reconcile-{disjoint,duplicate,revoked,revocation-timestamp-unavailable,mismatch}-{a,b}.json`
+(generator: `testdata/reconcile/gen/main.go`, run as `go run
+testdata/reconcile/gen/main.go` — regenerate by re-running it after any wire
+or canonicalization change; two fixed seeds represent two independently-keyed
+runtime instances, same rationale and pattern as `testdata/parity/gen/`).
+
 ### JCS canonicalization (`internal/jcs`)
 
 The outer signature is computed over RFC 8785 JCS bytes. `internal/jcs`
@@ -214,6 +330,10 @@ atlasent-audit-verify --chain chain.ndjson --keys keys.pem --head head.json
 
 # Read chain from stdin
 cat chain.ndjson | atlasent-audit-verify --chain - --keys keys.pem
+
+# Cross-runtime reconciliation (ADR CROSS-043) — envelope mode only, both
+# files independently verified first; '-' is not accepted for --reconcile-with
+atlasent-audit-verify --chain a.json --keys keys.pem --reconcile-with b.json
 
 # Run tests
 go test -race -count=1 ./...
@@ -318,8 +438,11 @@ internal/chain/              entry types, verify loop, head anchors, key interfa
 internal/envelope/           signed-export envelope: outer signature, ledger,
                              correlation (correlation.go), Evidence Archive
                              disclosures + integrity probes (archive.go)
+internal/reconcile/          ADR CROSS-043 cross-runtime reconciliation — the
+                             fifth layer, run across TWO already-verified
+                             envelopes (--reconcile-with)
 internal/jcs/                RFC 8785 JCS canonicalizer (outer-signature bytes)
-internal/keys/               PEM keystore (kid → ed25519.PublicKey)
+internal/keys/                PEM keystore (kid → ed25519.PublicKey)
 .github/workflows/
   ci.yml                     vet + test (race) + static build sanity on every PR
   release.yml                signed multi-platform release on vX.Y.Z tags
@@ -346,6 +469,18 @@ internal/keys/               PEM keystore (kid → ed25519.PublicKey)
   `recorded_not_verified_offline`. Do not add a branch that reports retention
   as verified, and do not let CLI wording imply a live retention guarantee
   because the export format carries the records.
+- **Reconciliation (ADR CROSS-043) is evidence, never authority** — nothing in
+  `internal/reconcile` may mutate, invalidate, or override either envelope's
+  own envelope/ledger/correlation/archive verdict, and no reconciliation
+  finding may ever be wired into a live `/v1-evaluate` or `/v1-verify-permit`
+  decision. It compares two files an operator supplies; do not add a fetch,
+  discovery mechanism, or live network path to it — that is `?reconcile=sync`
+  (V2-D7), an explicitly out-of-scope future direction, not this layer.
+  `CROSS_RUNTIME_POST_REVOCATION_VALIDITY` compares against
+  `verification_events[].revoked_at` (the real revocation moment) — never
+  `verified_at` (a re-presentation attempt time); when a revoked row has no
+  usable `revoked_at`, refuse (`RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE`)
+  rather than approximate.
 
 ## Branch convention
 
