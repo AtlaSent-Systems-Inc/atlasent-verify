@@ -924,6 +924,73 @@ func TestVerifyEngineVersionNeitherFormMatchesIsAFinding(t *testing.T) {
 	}
 }
 
+// TestVerifyEngineVersionExplicitNullFallsBackToLegacyForm proves the fix for
+// the Codex P1 finding on this PR: an entry carrying an EXPLICIT
+// `"engine_version": null` on the wire (key present, JSON null value — not
+// the key being entirely absent) must still fall back to the legacy
+// excluded-hash form when the primary (included) form doesn't match.
+//
+// Before the fix, the fallback was gated on `e.EngineVersion != nil`, a typed
+// *string field that Go's json.Unmarshal sets to nil for BOTH an explicit
+// wire `null` and a key that is entirely absent — so this case incorrectly
+// skipped the fallback and reported a false hash_mismatch for a
+// legacy-produced entry that should have verified cleanly.
+func TestVerifyEngineVersionExplicitNullFallsBackToLegacyForm(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 32)
+
+	entry := map[string]any{
+		"chain_version": json.Number("5"),
+		"org_id":        "org-1",
+		"sequence":      json.Number("1"),
+		"event_type":    "test.event",
+		"actor_id":      "actor-1",
+		"payload":       map[string]any{"k": "v1"},
+		"previous_hash": hex.EncodeToString(zeros),
+		"key_version":   "k1",
+		// Legacy exclude-form hash: engine_version is NOT part of the hashed
+		// canonical bytes below, matching the pre-#28 producer/verifier
+		// behavior — but the key is still explicitly present on the wire
+		// with a JSON null value, not omitted.
+	}
+	canonBytes, err := canonical.Bytes(entry)
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	h := sha256.New()
+	h.Write(zeros)
+	h.Write(canonBytes)
+	hash := h.Sum(nil)
+	entry["entry_hash"] = hex.EncodeToString(hash)
+	entry["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(sk, hash))
+	entry["engine_version"] = nil // explicit wire null, injected after hashing
+
+	out, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(out, []byte(`"engine_version":null`)) {
+		t.Fatalf("test fixture must carry an explicit engine_version:null key on the wire, got: %s", out)
+	}
+
+	res, err := Verify(bytes.NewReader(out), memKeys{pk: pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Findings) != 0 {
+		t.Fatalf("explicit-null engine_version entry must still verify via the legacy fallback; got findings: %+v", res.Findings)
+	}
+	if len(res.Warnings) != 1 || res.Warnings[0].Kind != "engine_version_legacy_hash_form" {
+		t.Fatalf("want exactly one engine_version_legacy_hash_form warning; got %+v", res.Warnings)
+	}
+	if res.SignaturesVerified != 1 {
+		t.Errorf("signatures_verified = %d, want 1", res.SignaturesVerified)
+	}
+}
+
 // TestVerifyUnknownKeyVersionWarns checks that an entry whose key_version
 // is not present in the keystore produces a warning (not a finding).  The
 // hash chain is still verified; only signature verification is skipped.

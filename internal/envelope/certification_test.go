@@ -178,6 +178,15 @@ func TestCertificationV6HappyPath(t *testing.T) {
 	if res.ProtectionConfigurationsTotal != 1 {
 		t.Fatalf("protection_configurations_total = %d, want 1", res.ProtectionConfigurationsTotal)
 	}
+	// Positive control for the Codex P1 fix: when the manifest actually
+	// declares every count section AND bundle_sha256, both must be reported
+	// as genuinely checked — the CLI's "verified" wording is honest here.
+	if !res.CertificationBundleHashChecked {
+		t.Fatalf("CertificationBundleHashChecked must be true when bundle_sha256 was declared and matched")
+	}
+	if got, want := len(res.CertificationCountsChecked), 6; got != want {
+		t.Fatalf("len(CertificationCountsChecked) = %d, want %d (got %v)", got, want, res.CertificationCountsChecked)
+	}
 }
 
 // A v6 manifest whose record_counts.protection_configurations disagrees with
@@ -420,5 +429,18 @@ func TestCertificationBundleHashSkippedWhenFieldAbsent(t *testing.T) {
 	}
 	if hasCode(res, CodeCertificationBundleHashMismatch) {
 		t.Fatalf("must not report a hash mismatch when bundle_sha256 was never declared: %v", res.Findings)
+	}
+	// Codex P1 finding on this PR: a skipped check must never be
+	// indistinguishable, at the VerificationResult level, from a check that
+	// actually ran and passed. CertificationBundleHashChecked must be false
+	// here so the CLI can report "not declared, not checked" rather than a
+	// false "verified".
+	if res.CertificationBundleHashChecked {
+		t.Fatalf("CertificationBundleHashChecked must be false when bundle_sha256 was never declared")
+	}
+	// The manifest declared a count for "evaluations" only, so that's the
+	// only section that should appear as checked.
+	if got, want := res.CertificationCountsChecked, []string{"evaluations"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("CertificationCountsChecked = %v, want %v", got, want)
 	}
 }

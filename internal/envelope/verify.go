@@ -205,6 +205,7 @@ func checkCertificationCounts(env *Envelope, res *VerificationResult) {
 		if claimed == nil {
 			return
 		}
+		res.CertificationCountsChecked = append(res.CertificationCountsChecked, name)
 		if *claimed != actual {
 			res.AddFinding(CodeCertificationCountMismatch, name,
 				fmt.Sprintf("certification manifest claims %d %s record(s) but the bundle carries %d", *claimed, name, actual))
@@ -256,6 +257,7 @@ func checkCertificationBundleHash(raw []byte, env *Envelope, res *VerificationRe
 	if env.Certification == nil || env.Certification.BundleSha256 == "" {
 		return
 	}
+	res.CertificationBundleHashChecked = true
 
 	// A second, independent raw decode of the whole envelope, keyed by JSON
 	// field name. This is deliberate: the typed Envelope fields for

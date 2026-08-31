@@ -233,13 +233,26 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 		//
 		// Primary: the CURRENT producer form (engine_version included when
 		// present) — canonicalizeForHash(raw, true). Fallback: the LEGACY
-		// engine_version-excluded form, attempted ONLY when engine_version is
-		// present AND the primary form failed to match. This is not an
-		// arbitrary alternate hash accepted on faith: it is the one other form
-		// this codebase has ever documented producing, and using it is always
-		// surfaced as a warning (see below) so a chain that needed it is
-		// auditable, never silently indistinguishable from one that matched on
-		// the first, current-producer try.
+		// engine_version-excluded form, attempted whenever the primary form
+		// failed to match. This is not an arbitrary alternate hash accepted on
+		// faith: it is the one other form this codebase has ever documented
+		// producing, and using it is always surfaced as a warning (see below)
+		// so a chain that needed it is auditable, never silently
+		// indistinguishable from one that matched on the first,
+		// current-producer try.
+		//
+		// The fallback is NOT gated on `e.EngineVersion != nil`. A legacy
+		// entry with `"engine_version": null` explicitly present on the wire
+		// unmarshals to the same nil *string as a key that is entirely absent
+		// (Go cannot distinguish "key present, value null" from "key absent"
+		// through a typed pointer field), so gating on that field would skip
+		// the fallback for exactly the entries that need it (atlasent-verify#28
+		// follow-up). Always attempting the fallback on a primary mismatch is
+		// also cheap and safe: when the key is truly absent, deleting it is a
+		// no-op and the legacy canonical form is byte-identical to the
+		// primary one, so the fallback simply reproduces the same (still
+		// mismatching) hash and falls through to the hash_mismatch finding
+		// below — it never manufactures a false match.
 		primaryCanon, err := canonicalizeForHash(raw, true)
 		if err != nil {
 			res.Findings = append(res.Findings, Finding{
@@ -255,7 +268,7 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 		gotHashHex := hex.EncodeToString(gotHash)
 
 		usedLegacyEngineVersionForm := false
-		if gotHashHex != e.EntryHash && e.EngineVersion != nil {
+		if gotHashHex != e.EntryHash {
 			if legacyCanon, legacyErr := canonicalizeForHash(raw, false); legacyErr == nil {
 				h2 := sha256.New()
 				h2.Write(st.prevHashBytes)
@@ -274,7 +287,7 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 			res.Findings = append(res.Findings, Finding{
 				LineNumber: line, OrgID: e.OrgID, Sequence: e.Sequence,
 				Kind: "hash_mismatch",
-				Detail: fmt.Sprintf("expected entry_hash %s, recomputed %s (checked both the current engine_version-included producer form and, since engine_version is present, the legacy excluded form)",
+				Detail: fmt.Sprintf("expected entry_hash %s, recomputed %s (checked both the current engine_version-included producer form and the legacy engine_version-excluded form)",
 					e.EntryHash, gotHashHex),
 			})
 			continue

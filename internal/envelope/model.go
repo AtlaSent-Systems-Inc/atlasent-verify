@@ -321,6 +321,19 @@ type VerificationResult struct {
 	// layer exists for this section (see Envelope.ProtectionConfigurations).
 	ProtectionConfigurationsTotal int `json:"protection_configurations_total,omitempty"`
 
+	// CertificationBundleHashChecked is true only when checkCertificationBundleHash
+	// actually recomputed and compared bundle_sha256 — false when the manifest
+	// declared no bundle_sha256 at all and the check was skipped (atlasent-verify#28
+	// follow-up: a skipped check must never be reported as a verified one).
+	CertificationBundleHashChecked bool `json:"certification_bundle_hash_checked,omitempty"`
+
+	// CertificationCountsChecked names the record-count sections the manifest
+	// actually declared a claimed count for (and that checkCertificationCounts
+	// therefore compared) — e.g. ["evaluations", "correlation_events"]. A section
+	// absent from this list had no claimed count in the manifest and was never
+	// checked, not a section that was checked and passed.
+	CertificationCountsChecked []string `json:"certification_counts_checked,omitempty"`
+
 	// KeyID is the envelope's declared signing key id (echoed for the reader).
 	KeyID string `json:"key_id,omitempty"`
 	// KeyTrusted is true when the outer signature verified against a key

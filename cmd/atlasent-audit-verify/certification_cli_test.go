@@ -238,3 +238,87 @@ func TestCLICertifiedV6ProtectionConfigurationsCountMismatch(t *testing.T) {
 		t.Fatalf("signature should verify cleanly; got:\n%s", out)
 	}
 }
+
+// TestCLICertifiedCopySkippedChecksNotReportedAsVerified is the CLI-level
+// regression for the second Codex P1 finding on this PR: when a manifest
+// omits bundle_sha256 (and declares a count for only some sections), the
+// summary line must say those checks were skipped, never "verified" — a
+// skipped check is not a passed one, and this repository's own committed v5
+// archive fixture triggered exactly this false-assurance line before the fix.
+func TestCLICertifiedCopySkippedChecksNotReportedAsVerified(t *testing.T) {
+	dir := t.TempDir()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPem := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+
+	cp := "v2|org-1|ac|d1|actor|allow||fp|ph1|b|1|rh|rf|2026-08-30T00:00:00.000000Z|GENESIS"
+	sum := sha256.Sum256([]byte(cp))
+	evaluations := []any{map[string]any{
+		"id": "d1", "decision": "allow", "permit_token_hash": "ph1",
+		"prev_hash": "", "entry_hash": hex.EncodeToString(sum[:]), "canonical_payload": cp,
+	}}
+
+	env := map[string]any{
+		"version": 1, "org_id": "org-1", "key_id": "eks_v5", "public_key_pem": pubPem,
+		"generated_at": "2026-08-30T00:00:00.000Z",
+		"evaluations":  evaluations,
+		"certification": map[string]any{
+			"version": 5,
+			// Only "evaluations" declared — every other count section, and
+			// bundle_sha256 itself, are deliberately omitted, matching an
+			// older/hand-built manifest this tool must keep tolerating.
+			"record_counts": map[string]any{"evaluations": 1},
+		},
+	}
+	unsigned, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := jcs.CanonicalizeRaw(unsigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canon))
+	wire, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	envPath := filepath.Join(dir, "certified-v5-sparse.json")
+	if err := os.WriteFile(envPath, wire, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type: "PUBLIC KEY", Headers: map[string]string{"kid": "eks_v5"}, Bytes: der,
+	})
+	keysPath := filepath.Join(dir, "keys.pem")
+	if err := os.WriteFile(keysPath, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := run(t, "--chain", envPath, "--keys", keysPath)
+	if code != 0 {
+		t.Fatalf("want exit 0 (no finding — every skipped check is tolerated), got %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "[OK  ] Certified copy (v5)") {
+		t.Fatalf("want an OK certified-copy summary line, got:\n%s", out)
+	}
+	if strings.Contains(out, "bundle_sha256 verified") {
+		t.Fatalf("bundle_sha256 was never declared and must not be reported as verified:\n%s", out)
+	}
+	if !strings.Contains(out, "bundle_sha256 not declared, not checked") {
+		t.Fatalf("want an explicit not-declared/not-checked line for bundle_sha256, got:\n%s", out)
+	}
+	if strings.Contains(out, "record counts verified;") {
+		t.Fatalf("only 1/6 count sections were declared — must not claim record counts verified outright:\n%s", out)
+	}
+	if !strings.Contains(out, "record counts verified for 1/6 declared section(s)") {
+		t.Fatalf("want a partial record-counts line naming 1/6, got:\n%s", out)
+	}
+}
