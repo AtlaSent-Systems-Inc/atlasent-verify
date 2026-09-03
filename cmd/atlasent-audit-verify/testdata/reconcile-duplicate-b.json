@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-08-31T00:00:00.000Z",
+  "key_id": "recon-fixture-b",
+  "org_id": "org-recon-fixture-0001",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAJRKRIZzMt/HHk03aJfa+Y2548gNeqv10ylnN3tZtpCw=\n-----END PUBLIC KEY-----\n",
+  "reconciliation_scope": {
+    "deployment_id": "dep-recon-fixture-0001"
+  },
+  "signature": "Y5a8KiGfjElH81X1g/Xk2zNCxEVqxkpI+vLg7PK3nxCJN1DgJI/tiX01hrpaV5cLCxVgxiS6azotdiD3rnsFBA==",
+  "verification_events": [
+    {
+      "id": "vb-dup-1",
+      "organization_id": "org-recon-fixture-0001",
+      "outcome": "verified",
+      "permit_token_hash": "ph-shared-dup-0001",
+      "presented_action_type": "production.deploy",
+      "presented_actor_id": "svc:runtime-instance",
+      "presented_environment": "live",
+      "verified_at": "2026-08-30T11:02:00.000Z"
+    }
+  ],
+  "version": 1
+}

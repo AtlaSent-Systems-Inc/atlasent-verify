@@ -23,6 +23,7 @@ import (
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/chain"
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/envelope"
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/keys"
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/reconcile"
 )
 
 // Version is stamped at build time via -ldflags
@@ -39,6 +40,7 @@ func main() {
 	requireSigs := flag.Bool("require-signatures", false, "Strict acceptance: fail (exit 1) unless signatures were verified against a known key. Requires --keys. In envelope mode, requires the outer signature to verify against an externally trusted key (not merely the envelope's embedded public_key_pem).")
 	bundle := flag.Bool("bundle", false, "Force envelope (signed export bundle) verification even if auto-detection is unsure.")
 	jsonOut := flag.Bool("json", false, "Emit the machine-readable verification result as JSON (envelope mode).")
+	reconcileWith := flag.String("reconcile-with", "", "Path to a SECOND signed export envelope to reconcile against --chain (ADR CROSS-043 cross-runtime reconciliation). Both files are independently verified first (unchanged behavior), then compared for cross-runtime duplicate-consumption / post-revocation-validity findings. Envelope mode only ('-' is not accepted here — stdin can supply only one file; use --chain - for the piped input and a real path here).")
 	showVer := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -55,6 +57,11 @@ func main() {
 
 	if *requireSigs && *keysPath == "" {
 		fmt.Fprintln(os.Stderr, "error: --require-signatures requires --keys (there is nothing to verify signatures against)")
+		os.Exit(2)
+	}
+
+	if *reconcileWith == "-" {
+		fmt.Fprintln(os.Stderr, "error: --reconcile-with does not accept '-' (stdin can supply only one input; use --chain - for the piped file and a real path for --reconcile-with)")
 		os.Exit(2)
 	}
 
@@ -88,7 +95,15 @@ func main() {
 	}
 
 	if *bundle || envelope.LooksLikeEnvelope(raw) {
+		if *reconcileWith != "" {
+			os.Exit(runEnvelopeReconcile(raw, *reconcileWith, ks, *requireSigs, *jsonOut))
+		}
 		os.Exit(runEnvelope(raw, ks, *requireSigs, *jsonOut, ks != nil))
+	}
+
+	if *reconcileWith != "" {
+		fmt.Fprintln(os.Stderr, "error: --reconcile-with requires --chain to be a signed export envelope (ADR CROSS-043 reconciliation compares verification_events[] across two envelopes, not the legacy NDJSON per-row chain)")
+		os.Exit(2)
 	}
 
 	runNDJSON(raw, ks, *headPath, *requireSigs)
@@ -125,6 +140,134 @@ func runEnvelope(raw []byte, ks chain.KeyStore, requireSigs, jsonOut, keysSuppli
 		return 1
 	}
 	return 0
+}
+
+// runEnvelopeReconcile verifies TWO signed export envelopes independently
+// (unchanged envelope/ledger/correlation/archive behavior, one call each to
+// envelope.Verify) and then runs internal/reconcile across them (ADR
+// CROSS-043). Returns the process exit code.
+//
+// Ordering matters: each envelope is fully, independently verified BEFORE
+// reconciliation ever runs — reconciliation never substitutes for that, and
+// its result never alters either envelope's own verdict (see
+// internal/reconcile's package doc).
+func runEnvelopeReconcile(rawA []byte, reconcileWithPath string, ks chain.KeyStore, requireSigs, jsonOut bool) int {
+	resA, err := envelope.Verify(rawA, ks)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: verify chain (A, --chain): %v\n", err)
+		return 2
+	}
+
+	rawB, err := os.ReadFile(reconcileWithPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: open --reconcile-with file: %v\n", err)
+		return 2
+	}
+	if !envelope.LooksLikeEnvelope(rawB) {
+		fmt.Fprintln(os.Stderr, "error: --reconcile-with file is not a signed export envelope (ADR CROSS-043 reconciliation compares two envelopes, not an NDJSON chain)")
+		return 2
+	}
+	resB, err := envelope.Verify(rawB, ks)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: verify chain (B, --reconcile-with): %v\n", err)
+		return 2
+	}
+
+	envA, err := envelope.ParseEnvelope(rawA)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: parse chain (A, --chain): %v\n", err)
+		return 2
+	}
+	envB, err := envelope.ParseEnvelope(rawB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: parse --reconcile-with file: %v\n", err)
+		return 2
+	}
+
+	recRes := reconcile.Reconcile(envA, envB)
+
+	if jsonOut {
+		out := struct {
+			A              *envelope.VerificationResult `json:"a"`
+			B              *envelope.VerificationResult `json:"b"`
+			Reconciliation *reconcile.Result            `json:"reconciliation"`
+		}{A: resA, B: resB, Reconciliation: recRes}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(out)
+	} else {
+		fmt.Fprintln(os.Stdout, "── Export A (--chain) ──")
+		printEnvelopeHuman(resA)
+		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(os.Stdout, "── Export B (--reconcile-with) ──")
+		printEnvelopeHuman(resB)
+		printReconcileHuman(recRes)
+	}
+
+	aOK, bOK := resA.OK(), resB.OK()
+	if requireSigs {
+		var reasonA, reasonB string
+		aOK, reasonA = resA.StrictOK()
+		bOK, reasonB = resB.StrictOK()
+		if !aOK || !bOK || !recRes.OK() {
+			fmt.Fprintf(os.Stdout, "NOT ACCEPTED (--require-signatures): A ok=%v (%s); B ok=%v (%s); reconciliation_integrity=%s\n",
+				aOK, reasonA, bOK, reasonB, recRes.ReconciliationIntegrity)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "ACCEPTED (--require-signatures): both exports verified against a trusted key; reconciliation raised no finding")
+		return 0
+	}
+	if !aOK || !bOK || !recRes.OK() {
+		return 1
+	}
+	return 0
+}
+
+// printReconcileHuman prints the fifth, reconciliation, line — ALONGSIDE,
+// never replacing, the envelope/ledger/correlation/archive lines each side
+// already printed via printEnvelopeHuman. Reconciliation is evidence only: it
+// never alters either export's own verdict, and this function does not touch
+// resA/resB.
+func printReconcileHuman(res *reconcile.Result) {
+	mark := func(v reconcile.Verdict) string {
+		switch v {
+		case reconcile.VerdictVerified:
+			return "OK  "
+		case reconcile.VerdictInvalid:
+			return "FAIL"
+		case reconcile.VerdictAbsent:
+			return "—   "
+		case reconcile.VerdictRefused:
+			return "REFU"
+		default:
+			return "?   "
+		}
+	}
+
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintf(os.Stdout, "[%s] Reconciliation integrity (ADR CROSS-043, cross-runtime)", mark(res.ReconciliationIntegrity))
+	switch res.ReconciliationIntegrity {
+	case reconcile.VerdictRefused:
+		fmt.Fprintln(os.Stdout)
+	case reconcile.VerdictAbsent:
+		fmt.Fprintf(os.Stdout, " — absent (org_id=%s deployment_id=%s scopes match; no overlapping permit_token_hash between the two exports — the expected steady state for two correctly-operating, disjoint instances)\n",
+			res.OrgID, res.DeploymentID)
+	default:
+		fmt.Fprintf(os.Stdout, " — org_id=%s deployment_id=%s, %d overlapping permit_token_hash value(s) compared\n",
+			res.OrgID, res.DeploymentID, res.OverlappingPermitTokenHashes)
+	}
+
+	for _, f := range res.Findings {
+		if f.Record != "" {
+			fmt.Fprintf(os.Stdout, "  ! %s [%s]: %s\n", f.Code, f.Record, f.Detail)
+		} else {
+			fmt.Fprintf(os.Stdout, "  ! %s: %s\n", f.Code, f.Detail)
+		}
+	}
+
+	if res.OK() {
+		fmt.Fprintln(os.Stdout, "ok: reconciliation is evidence only — it does not alter either export's own envelope/ledger/correlation/archive verdicts")
+	}
 }
 
 // printEnvelopeHuman prints a defensible human summary. A lifecycle stage line

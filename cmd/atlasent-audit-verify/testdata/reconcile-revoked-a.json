@@ -1,0 +1,24 @@
+{
+  "generated_at": "2026-08-31T00:00:00.000Z",
+  "key_id": "recon-fixture-a",
+  "org_id": "org-recon-fixture-0001",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA1241jZ+fHhzEADtTP1+oGVQ2lRjjQIr4Tg1uqzf1qu4=\n-----END PUBLIC KEY-----\n",
+  "reconciliation_scope": {
+    "deployment_id": "dep-recon-fixture-0001"
+  },
+  "signature": "84ajTYSt9pxYBaKtyObYypzcyM7E7n2kQxhHzCc5g9TER/vvF7QOVhFzfZ6hNmYPqLwv/DcKfmLWgmYY5O8oAQ==",
+  "verification_events": [
+    {
+      "id": "va-revoke-1",
+      "organization_id": "org-recon-fixture-0001",
+      "outcome": "revoked",
+      "permit_token_hash": "ph-shared-revoke-0001",
+      "presented_action_type": "production.deploy",
+      "presented_actor_id": "svc:runtime-instance",
+      "presented_environment": "live",
+      "revoked_at": "2026-08-30T09:00:00.000Z",
+      "verified_at": "2026-08-30T23:00:00.000Z"
+    }
+  ],
+  "version": 1
+}

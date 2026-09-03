@@ -65,6 +65,22 @@ func LooksLikeEnvelope(raw []byte) bool {
 		probe.Probes != nil
 }
 
+// ParseEnvelope decodes raw JSON bytes into an Envelope struct. It performs no
+// verification of any kind — Verify does that. Exported so a caller that needs
+// the parsed structure ALONGSIDE (never instead of) Verify's independent
+// verdicts doesn't have to re-implement JSON decoding: internal/reconcile
+// (ADR CROSS-043) is the motivating case — it compares two
+// already-independently-VERIFIED envelopes' org_id / reconciliation_scope /
+// verification_events[] fields, which VerificationResult itself does not
+// carry.
+func ParseEnvelope(raw []byte) (*Envelope, error) {
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("envelope: parse: %w", err)
+	}
+	return &env, nil
+}
+
 // Verify verifies an audit-export envelope. `keys` resolves the envelope's
 // key_id to an EXTERNALLY TRUSTED public key; when nil (or the key_id is
 // absent from it) the verifier falls back to the envelope's embedded
@@ -86,10 +102,11 @@ func Verify(raw []byte, keys chain.KeyStore) (*VerificationResult, error) {
 		RetentionAssurance:    RetentionNotApplicable,
 	}
 
-	var env Envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("envelope: parse: %w", err)
+	envPtr, err := ParseEnvelope(raw)
+	if err != nil {
+		return nil, err
 	}
+	env := *envPtr
 	res.KeyID = env.KeyID
 	res.CorrelationRecordsTotal = len(env.Correlations)
 	res.ArchiveRecordsTotal = len(env.Retrievals) + len(env.Probes)
