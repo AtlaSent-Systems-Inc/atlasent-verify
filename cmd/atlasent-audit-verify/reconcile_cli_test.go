@@ -395,3 +395,29 @@ func TestCLIReconcile_RequireSignaturesFailsOnReconciliationFinding(t *testing.T
 		t.Errorf("missing NOT ACCEPTED line; out=%q", stdout)
 	}
 }
+
+func TestCLIReconcile_JSONRequireSignaturesRemainsValidJSON(t *testing.T) {
+	a, b := reconcileFixture("disjoint")
+	keys := reconcileKeyfile(t, a, b)
+	stdout, code := run(t, "--chain", a, "--keys", keys, "--reconcile-with", b, "--require-signatures", "--json")
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0\n%s", code, stdout)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("strict-mode stdout must be exactly one JSON value: %v\n%s", err, stdout)
+	}
+}
+
+func TestCLIReconcile_JSONRequireSignaturesFindingRemainsValidJSON(t *testing.T) {
+	a, b := reconcileFixture("duplicate")
+	keys := reconcileKeyfile(t, a, b)
+	stdout, code := run(t, "--chain", a, "--keys", keys, "--reconcile-with", b, "--require-signatures", "--json")
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1\n%s", code, stdout)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("strict failure stdout must be exactly one JSON value: %v\n%s", err, stdout)
+	}
+}
