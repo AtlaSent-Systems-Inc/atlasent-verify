@@ -130,10 +130,14 @@ func runEnvelope(raw []byte, ks chain.KeyStore, requireSigs, jsonOut, keysSuppli
 	if requireSigs {
 		ok, reason := res.StrictOK()
 		if !ok {
-			fmt.Fprintf(os.Stdout, "NOT ACCEPTED (--require-signatures): %s\n", reason)
+			if !jsonOut {
+				fmt.Fprintf(os.Stdout, "NOT ACCEPTED (--require-signatures): %s\n", reason)
+			}
 			return 1
 		}
-		fmt.Fprintf(os.Stdout, "ACCEPTED (--require-signatures): %s\n", reason)
+		if !jsonOut {
+			fmt.Fprintf(os.Stdout, "ACCEPTED (--require-signatures): %s\n", reason)
+		}
 		return 0
 	}
 	if !res.OK() {
@@ -210,11 +214,15 @@ func runEnvelopeReconcile(rawA []byte, reconcileWithPath string, ks chain.KeySto
 		aOK, reasonA = resA.StrictOK()
 		bOK, reasonB = resB.StrictOK()
 		if !aOK || !bOK || !recRes.OK() {
-			fmt.Fprintf(os.Stdout, "NOT ACCEPTED (--require-signatures): A ok=%v (%s); B ok=%v (%s); reconciliation_integrity=%s\n",
-				aOK, reasonA, bOK, reasonB, recRes.ReconciliationIntegrity)
+			if !jsonOut {
+				fmt.Fprintf(os.Stdout, "NOT ACCEPTED (--require-signatures): A ok=%v (%s); B ok=%v (%s); reconciliation_integrity=%s\n",
+					aOK, reasonA, bOK, reasonB, recRes.ReconciliationIntegrity)
+			}
 			return 1
 		}
-		fmt.Fprintln(os.Stdout, "ACCEPTED (--require-signatures): both exports verified against a trusted key; reconciliation raised no finding")
+		if !jsonOut {
+			fmt.Fprintln(os.Stdout, "ACCEPTED (--require-signatures): both exports verified against a trusted key; reconciliation raised no finding")
+		}
 		return 0
 	}
 	if !aOK || !bOK || !recRes.OK() {
