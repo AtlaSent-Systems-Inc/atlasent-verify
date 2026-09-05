@@ -86,7 +86,19 @@ func TestReconcile_ScopeMismatch_NeverSilentlySkipped(t *testing.T) {
 	}
 }
 
-func TestReconcile_Absent_NoOverlap(t *testing.T) {
+// ─── evidence completeness (atlasent-verify#30, atlasent-docs#648) ───────────
+//
+// A "nothing found" result — no overlap at all (what used to be an
+// unconditional VerdictAbsent) or a clean overlap (what used to be an
+// unconditional VerdictVerified) — can no longer be presented as proof that
+// no cross-runtime conflict exists: the producer's export cannot attest that
+// verification_events[] is its complete, authoritative revocation/consumption
+// record (see evidenceCompletenessProven). Every test below that used to
+// assert VerdictAbsent/VerdictVerified for a no-finding case now asserts
+// VerdictUnavailable plus the CodeEvidenceCompletenessUnavailable finding,
+// and that res.OK() is false (fail-closed, not a silent downgrade).
+
+func TestReconcile_NoOverlap_ReportsUnavailable_NotAbsent(t *testing.T) {
 	a := scoped("org-1", "dep-1")
 	a.Verifications = []envelope.VerificationRow{
 		{ID: "va", PermitTokenHash: "ph-a-only", Outcome: "verified", VerifiedAt: "2026-08-01T00:00:00Z"},
@@ -96,14 +108,14 @@ func TestReconcile_Absent_NoOverlap(t *testing.T) {
 		{ID: "vb", PermitTokenHash: "ph-b-only", Outcome: "verified", VerifiedAt: "2026-08-01T00:00:00Z"},
 	}
 	res := Reconcile(&a, &b)
-	if res.ReconciliationIntegrity != VerdictAbsent {
-		t.Fatalf("verdict = %s, want absent", res.ReconciliationIntegrity)
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable (no overlap does not, by itself, prove no conflict exists — see #648)", res.ReconciliationIntegrity)
 	}
-	if len(res.Findings) != 0 {
-		t.Fatalf("findings = %+v, want none", res.Findings)
+	if res.OK() {
+		t.Fatalf("unavailable must NOT be OK() — fail closed, not a silent pass")
 	}
-	if !res.OK() {
-		t.Fatalf("absent must be OK() (a success), not a failure")
+	if len(res.Findings) != 1 || res.Findings[0].Code != CodeEvidenceCompletenessUnavailable {
+		t.Fatalf("findings = %+v, want exactly one RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE", res.Findings)
 	}
 	if res.OverlappingPermitTokenHashes != 0 {
 		t.Fatalf("overlap = %d, want 0", res.OverlappingPermitTokenHashes)
@@ -113,21 +125,24 @@ func TestReconcile_Absent_NoOverlap(t *testing.T) {
 	}
 }
 
-func TestReconcile_Absent_NoVerificationRecordsAtAll(t *testing.T) {
+func TestReconcile_NoVerificationRecordsAtAll_ReportsUnavailable(t *testing.T) {
 	a := scoped("org-1", "dep-1")
 	b := scoped("org-1", "dep-1")
 	res := Reconcile(&a, &b)
-	if res.ReconciliationIntegrity != VerdictAbsent {
-		t.Fatalf("verdict = %s, want absent", res.ReconciliationIntegrity)
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable", res.ReconciliationIntegrity)
+	}
+	if len(res.Findings) != 1 || res.Findings[0].Code != CodeEvidenceCompletenessUnavailable {
+		t.Fatalf("findings = %+v, want exactly one RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE", res.Findings)
 	}
 }
 
-func TestReconcile_Verified_OverlapNoDivergence(t *testing.T) {
+func TestReconcile_CleanOverlap_ReportsUnavailable_NotVerified(t *testing.T) {
 	// Overlapping permit, but only ONE side ever validated it (e.g. it was
 	// presented to B and rejected as expired) — no duplicate consumption, no
-	// revocation-after-valid ordering problem. This must be VERIFIED
-	// (something was compared and came out clean), distinct from ABSENT
-	// (nothing to compare).
+	// revocation-after-valid ordering problem. Something WAS compared (unlike
+	// the no-overlap case), but the clean result still cannot be presented as
+	// proof of no conflict — same evidence-completeness gate applies.
 	a := scoped("org-1", "dep-1")
 	a.Verifications = []envelope.VerificationRow{
 		{ID: "va", PermitTokenHash: "ph-shared", Outcome: "verified", VerifiedAt: "2026-08-01T00:00:00Z"},
@@ -137,17 +152,75 @@ func TestReconcile_Verified_OverlapNoDivergence(t *testing.T) {
 		{ID: "vb", PermitTokenHash: "ph-shared", Outcome: "expired", VerifiedAt: "2026-08-02T00:00:00Z"},
 	}
 	res := Reconcile(&a, &b)
-	if res.ReconciliationIntegrity != VerdictVerified {
-		t.Fatalf("verdict = %s, want verified", res.ReconciliationIntegrity)
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable", res.ReconciliationIntegrity)
 	}
-	if len(res.Findings) != 0 {
-		t.Fatalf("findings = %+v, want none", res.Findings)
+	if res.OK() {
+		t.Fatalf("unavailable must NOT be OK()")
+	}
+	if len(res.Findings) != 1 || res.Findings[0].Code != CodeEvidenceCompletenessUnavailable {
+		t.Fatalf("findings = %+v, want exactly one RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE", res.Findings)
 	}
 	if res.OverlappingPermitTokenHashes != 1 {
 		t.Fatalf("overlap = %d, want 1", res.OverlappingPermitTokenHashes)
 	}
-	if !res.OK() {
-		t.Fatalf("verified must be OK()")
+}
+
+func TestReconcile_EvidenceCompleteness_UnaffectedByCertificationPresence(t *testing.T) {
+	// A real, internally-consistent Certification manifest (matching
+	// record_counts.verification_events, exactly what checkCertificationCounts
+	// in internal/envelope checks) is NOT sufficient evidence of the
+	// authoritative completeness reconciliation needs (see #648 point 2:
+	// verification-event recording itself can fail open after a successful
+	// consumption, so a byte-perfect count match can still be missing the row
+	// that would show a conflict). This guards against a future "helpful"
+	// shortcut that would treat a matching manifest as proof of completeness.
+	n := 1
+	a := scoped("org-1", "dep-1")
+	a.Verifications = []envelope.VerificationRow{
+		{ID: "va", PermitTokenHash: "ph-a-only", Outcome: "verified", VerifiedAt: "2026-08-01T00:00:00Z"},
+	}
+	a.Certification = &envelope.Certification{
+		Version:      envelope.SupportedCertificationVersion,
+		RecordCounts: envelope.CertificationRecordCounts{VerificationEvents: &n},
+	}
+	b := scoped("org-1", "dep-1")
+	b.Verifications = []envelope.VerificationRow{
+		{ID: "vb", PermitTokenHash: "ph-b-only", Outcome: "verified", VerifiedAt: "2026-08-01T00:00:00Z"},
+	}
+	b.Certification = &envelope.Certification{
+		Version:      envelope.SupportedCertificationVersion,
+		RecordCounts: envelope.CertificationRecordCounts{VerificationEvents: &n},
+	}
+	res := Reconcile(&a, &b)
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable — a matching certification manifest must not be treated as authoritative completeness evidence", res.ReconciliationIntegrity)
+	}
+	if len(res.Findings) != 1 || res.Findings[0].Code != CodeEvidenceCompletenessUnavailable {
+		t.Fatalf("findings = %+v, want exactly one RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE", res.Findings)
+	}
+}
+
+func TestReconcile_Findings_UnaffectedByEvidenceCompletenessGate(t *testing.T) {
+	// A genuine finding (duplicate consumption here) must still surface as
+	// VerdictInvalid — never softened to VerdictUnavailable. Incompleteness
+	// only bears on the ABSENCE of a finding, never on an actual one found.
+	a := scoped("org-1", "dep-1")
+	a.Verifications = []envelope.VerificationRow{
+		{ID: "va", PermitTokenHash: "ph-dup", Outcome: "verified", VerifiedAt: "2026-08-01T00:00:00Z"},
+	}
+	b := scoped("org-1", "dep-1")
+	b.Verifications = []envelope.VerificationRow{
+		{ID: "vb", PermitTokenHash: "ph-dup", Outcome: "verified", VerifiedAt: "2026-08-01T00:05:00Z"},
+	}
+	res := Reconcile(&a, &b)
+	if res.ReconciliationIntegrity != VerdictInvalid {
+		t.Fatalf("verdict = %s, want invalid (a real finding must not be downgraded by the completeness gate)", res.ReconciliationIntegrity)
+	}
+	for _, f := range res.Findings {
+		if f.Code == CodeEvidenceCompletenessUnavailable {
+			t.Fatalf("findings = %+v, must not ALSO carry the completeness finding once a real one fired", res.Findings)
+		}
 	}
 }
 
@@ -185,8 +258,17 @@ func TestReconcile_DuplicateConsumption_OnlyOneSideValid_NoFinding(t *testing.T)
 		{ID: "vb", PermitTokenHash: "ph-1", Outcome: "replay_blocked", VerifiedAt: "2026-08-01T00:05:00Z"},
 	}
 	res := Reconcile(&a, &b)
-	if res.ReconciliationIntegrity != VerdictVerified {
-		t.Fatalf("verdict = %s, want verified (only one side actually consumed it)", res.ReconciliationIntegrity)
+	// Only one side actually consumed it, so no CodeDuplicateConsumption
+	// finding — but a no-finding result is VerdictUnavailable (evidence
+	// completeness gate), not VerdictVerified. See the evidence-completeness
+	// test block above.
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable (no finding, but not provably complete)", res.ReconciliationIntegrity)
+	}
+	for _, f := range res.Findings {
+		if f.Code == CodeDuplicateConsumption {
+			t.Fatalf("findings = %+v, must not fire duplicate-consumption when only one side consumed it", res.Findings)
+		}
 	}
 }
 
@@ -255,6 +337,119 @@ func TestReconcile_PostRevocationValidity_UsesRevokedAt_NotVerifiedAt(t *testing
 	}
 }
 
+// ─── ±50ms clock-uncertainty tolerance (atlasent-verify#30, ADR-022) ─────────
+//
+// checkPostRevocationValidity/earliestValidAfter must not flag a "valid
+// after revoked" ordering as a finding when the gap between the two
+// timestamps is within the accepted cross-runtime clock-uncertainty window —
+// pinned to ADR-022's ±50ms NTP-drift figure, per issue #30's own acceptance
+// criterion. These pin the exact boundary (50ms itself is tolerated; 50ms+1ms
+// is not) and prove the tolerance is not applied in the wrong direction —
+// it must never mask a real, larger violation.
+
+func revokedAtRow(id, hash, revokedAt string) envelope.VerificationRow {
+	return envelope.VerificationRow{ID: id, PermitTokenHash: hash, Outcome: outcomeRevoked, RevokedAt: revokedAt}
+}
+
+func validAtRow(id, hash, verifiedAt string) envelope.VerificationRow {
+	return envelope.VerificationRow{ID: id, PermitTokenHash: hash, Outcome: outcomeValid, VerifiedAt: verifiedAt}
+}
+
+func TestReconcile_ClockTolerance_ExactlyAtBoundary_NoFinding(t *testing.T) {
+	// validAt is EXACTLY 50ms after revokedAt — at the tolerance boundary,
+	// inclusive. Must NOT be a finding: ordinary clock disagreement between
+	// two independently-NTP-disciplined instances, not evidence of a real
+	// ordering violation.
+	a := scoped("org-1", "dep-1")
+	a.Verifications = []envelope.VerificationRow{revokedAtRow("va-revoke", "ph-1", "2026-08-01T00:00:00.000000000Z")}
+	b := scoped("org-1", "dep-1")
+	b.Verifications = []envelope.VerificationRow{validAtRow("vb-valid", "ph-1", "2026-08-01T00:00:00.050000000Z")}
+
+	res := Reconcile(&a, &b)
+	for _, f := range res.Findings {
+		if f.Code == CodePostRevocationValidity {
+			t.Fatalf("findings = %+v, a gap of EXACTLY 50ms must be tolerated, not flagged", res.Findings)
+		}
+	}
+	// No finding fired, so the evidence-completeness gate applies —
+	// VerdictUnavailable, not VerdictVerified (see the block above).
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable (no finding at the tolerance boundary)", res.ReconciliationIntegrity)
+	}
+}
+
+func TestReconcile_ClockTolerance_JustOverBoundary_Finding(t *testing.T) {
+	// validAt is 50ms + 1ms after revokedAt — just past the tolerance. MUST
+	// fire: proves the tolerance has a real, finite edge and isn't silently
+	// wider than ±50ms (which would mask genuine violations).
+	a := scoped("org-1", "dep-1")
+	a.Verifications = []envelope.VerificationRow{revokedAtRow("va-revoke", "ph-1", "2026-08-01T00:00:00.000000000Z")}
+	b := scoped("org-1", "dep-1")
+	b.Verifications = []envelope.VerificationRow{validAtRow("vb-valid", "ph-1", "2026-08-01T00:00:00.051000000Z")}
+
+	res := Reconcile(&a, &b)
+	if res.ReconciliationIntegrity != VerdictInvalid {
+		t.Fatalf("verdict = %s, want invalid (51ms exceeds the ±50ms tolerance)", res.ReconciliationIntegrity)
+	}
+	if len(res.Findings) != 1 || res.Findings[0].Code != CodePostRevocationValidity {
+		t.Fatalf("findings = %+v, want exactly one CROSS_RUNTIME_POST_REVOCATION_VALIDITY", res.Findings)
+	}
+}
+
+func TestReconcile_ClockTolerance_WellUnderBoundary_NoFinding(t *testing.T) {
+	// A small, unremarkable 10ms gap — comfortably inside tolerance.
+	a := scoped("org-1", "dep-1")
+	a.Verifications = []envelope.VerificationRow{revokedAtRow("va-revoke", "ph-1", "2026-08-01T00:00:00.000000000Z")}
+	b := scoped("org-1", "dep-1")
+	b.Verifications = []envelope.VerificationRow{validAtRow("vb-valid", "ph-1", "2026-08-01T00:00:00.010000000Z")}
+
+	res := Reconcile(&a, &b)
+	for _, f := range res.Findings {
+		if f.Code == CodePostRevocationValidity {
+			t.Fatalf("findings = %+v, a 10ms gap must be tolerated", res.Findings)
+		}
+	}
+}
+
+func TestReconcile_ClockTolerance_DoesNotMaskALargeViolation(t *testing.T) {
+	// Sanity check on the tolerance's actual size: a gap double the tolerance
+	// (100ms) must still fire. Guards against a regression where the
+	// tolerance is accidentally widened (e.g. to seconds) and silently
+	// swallows real violations.
+	a := scoped("org-1", "dep-1")
+	a.Verifications = []envelope.VerificationRow{revokedAtRow("va-revoke", "ph-1", "2026-08-01T00:00:00.000000000Z")}
+	b := scoped("org-1", "dep-1")
+	b.Verifications = []envelope.VerificationRow{validAtRow("vb-valid", "ph-1", "2026-08-01T00:00:00.100000000Z")}
+
+	res := Reconcile(&a, &b)
+	if res.ReconciliationIntegrity != VerdictInvalid {
+		t.Fatalf("verdict = %s, want invalid (100ms is double the ±50ms tolerance)", res.ReconciliationIntegrity)
+	}
+	if len(res.Findings) != 1 || res.Findings[0].Code != CodePostRevocationValidity {
+		t.Fatalf("findings = %+v, want exactly one CROSS_RUNTIME_POST_REVOCATION_VALIDITY", res.Findings)
+	}
+}
+
+func TestReconcile_ClockTolerance_NotAppliedInWrongDirection(t *testing.T) {
+	// validAt BEFORE revokedAt (by an amount smaller than the tolerance) is
+	// not a "post-revocation" ordering at all — it must never be flagged, and
+	// the tolerance must never be applied as if it were symmetric/absolute
+	// (i.e. treating a 50ms-EARLIER valid timestamp as somehow "close enough"
+	// to a violation). This pins the direction: only a validAt AFTER
+	// revokedAt by MORE than the tolerance is ever a finding.
+	a := scoped("org-1", "dep-1")
+	a.Verifications = []envelope.VerificationRow{revokedAtRow("va-revoke", "ph-1", "2026-08-01T00:00:00.050000000Z")}
+	b := scoped("org-1", "dep-1")
+	b.Verifications = []envelope.VerificationRow{validAtRow("vb-valid", "ph-1", "2026-08-01T00:00:00.000000000Z")}
+
+	res := Reconcile(&a, &b)
+	for _, f := range res.Findings {
+		if f.Code == CodePostRevocationValidity {
+			t.Fatalf("findings = %+v, a valid timestamp strictly BEFORE the revocation must never be flagged", res.Findings)
+		}
+	}
+}
+
 func TestReconcile_RevocationTimestampUnavailable(t *testing.T) {
 	// A revoked row with NO revoked_at (a pre-CROSS-043-§2 export). Must
 	// refuse the comparison for this pair with the dedicated code — never
@@ -305,19 +500,25 @@ func TestReconcile_RevocationBeforeValidity_NotAFinding(t *testing.T) {
 		{ID: "vb-valid", PermitTokenHash: "ph-1", Outcome: "verified", VerifiedAt: "2026-08-01T01:00:00Z"},
 	}
 	res := Reconcile(&a, &b)
-	if res.ReconciliationIntegrity != VerdictVerified {
-		t.Fatalf("verdict = %s, want verified (valid strictly precedes revocation — no lag to report)", res.ReconciliationIntegrity)
+	// Valid strictly precedes revocation — no lag to report, so no
+	// CodePostRevocationValidity finding. A no-finding result is
+	// VerdictUnavailable (evidence completeness gate), not VerdictVerified.
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable (no lag finding, but not provably complete)", res.ReconciliationIntegrity)
 	}
-	if len(res.Findings) != 0 {
-		t.Fatalf("findings = %+v, want none", res.Findings)
+	for _, f := range res.Findings {
+		if f.Code == CodePostRevocationValidity {
+			t.Fatalf("findings = %+v, must not fire when valid strictly precedes revocation", res.Findings)
+		}
 	}
 }
 
 func TestReconcile_UnparseableTimestamp_NoFinding(t *testing.T) {
 	// No revocation recorded on either side at all here (outcome=expired, not
-	// revoked) — nothing to compare, so no finding of any kind. Distinct from
-	// TestReconcile_RevocationTimestampUnavailable*, where a revocation WAS
-	// recorded but its timestamp isn't usable (a refusal, not silence).
+	// revoked) — nothing to compare, so no timing finding of any kind.
+	// Distinct from TestReconcile_RevocationTimestampUnavailable*, where a
+	// revocation WAS recorded but its timestamp isn't usable (a refusal, not
+	// silence).
 	a := scoped("org-1", "dep-1")
 	a.Verifications = []envelope.VerificationRow{
 		{ID: "va-expired", PermitTokenHash: "ph-1", Outcome: "expired", VerifiedAt: ""},
@@ -327,11 +528,13 @@ func TestReconcile_UnparseableTimestamp_NoFinding(t *testing.T) {
 		{ID: "vb-valid", PermitTokenHash: "ph-1", Outcome: "verified", VerifiedAt: "not-a-timestamp"},
 	}
 	res := Reconcile(&a, &b)
-	if res.ReconciliationIntegrity != VerdictVerified {
-		t.Fatalf("verdict = %s, want verified (no revocation recorded on either side, so no timing comparison is even attempted)", res.ReconciliationIntegrity)
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable (no timing finding, but not provably complete)", res.ReconciliationIntegrity)
 	}
-	if len(res.Findings) != 0 {
-		t.Fatalf("findings = %+v, want none", res.Findings)
+	for _, f := range res.Findings {
+		if f.Code == CodePostRevocationValidity || f.Code == CodeRevocationTimestampUnavailable {
+			t.Fatalf("findings = %+v, must carry no timing-comparison finding when no revocation was recorded", res.Findings)
+		}
 	}
 }
 
@@ -348,11 +551,13 @@ func TestReconcile_ValidWithUnparseableTimestamp_NoFinding(t *testing.T) {
 		{ID: "vb-valid", PermitTokenHash: "ph-1", Outcome: "verified", VerifiedAt: "garbage"},
 	}
 	res := Reconcile(&a, &b)
-	if res.ReconciliationIntegrity != VerdictVerified {
-		t.Fatalf("verdict = %s, want verified (the candidate valid row's timestamp could not be ordered)", res.ReconciliationIntegrity)
+	if res.ReconciliationIntegrity != VerdictUnavailable {
+		t.Fatalf("verdict = %s, want unavailable (the candidate valid row's timestamp could not be ordered, but that is not a finding — and the resulting no-finding result is not provably complete)", res.ReconciliationIntegrity)
 	}
-	if len(res.Findings) != 0 {
-		t.Fatalf("findings = %+v, want none", res.Findings)
+	for _, f := range res.Findings {
+		if f.Code == CodePostRevocationValidity {
+			t.Fatalf("findings = %+v, must not fabricate a finding from an unorderable timestamp", res.Findings)
+		}
 	}
 }
 

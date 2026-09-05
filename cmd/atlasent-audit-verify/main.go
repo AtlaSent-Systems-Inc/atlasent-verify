@@ -247,6 +247,8 @@ func printReconcileHuman(res *reconcile.Result) {
 			return "—   "
 		case reconcile.VerdictRefused:
 			return "REFU"
+		case reconcile.VerdictUnavailable:
+			return "UNAV"
 		default:
 			return "?   "
 		}
@@ -260,6 +262,9 @@ func printReconcileHuman(res *reconcile.Result) {
 	case reconcile.VerdictAbsent:
 		fmt.Fprintf(os.Stdout, " — absent (org_id=%s deployment_id=%s scopes match; no overlapping permit_token_hash between the two exports — the expected steady state for two correctly-operating, disjoint instances)\n",
 			res.OrgID, res.DeploymentID)
+	case reconcile.VerdictUnavailable:
+		fmt.Fprintf(os.Stdout, " — unavailable (org_id=%s deployment_id=%s, %d overlapping permit_token_hash value(s) compared, no finding — but the producer's export cannot attest evidence completeness; see finding below)\n",
+			res.OrgID, res.DeploymentID, res.OverlappingPermitTokenHashes)
 	default:
 		fmt.Fprintf(os.Stdout, " — org_id=%s deployment_id=%s, %d overlapping permit_token_hash value(s) compared\n",
 			res.OrgID, res.DeploymentID, res.OverlappingPermitTokenHashes)

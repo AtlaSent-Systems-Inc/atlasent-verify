@@ -94,8 +94,9 @@ Machine-readable failure codes: `ENVELOPE_SIGNATURE_INVALID`,
 layer (ADR CROSS-043, `--reconcile-with`) registers its own separate family —
 `RECONCILIATION_SCOPE_MISMATCH`, `CROSS_RUNTIME_DUPLICATE_CONSUMPTION`,
 `CROSS_RUNTIME_POST_REVOCATION_VALIDITY`,
-`RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE` — documented in full in
-"Cross-runtime reconciliation" below.
+`RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE`,
+`RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE` (atlasent-verify#30) —
+documented in full in "Cross-runtime reconciliation" below.
 
 `CORRELATION_DECISION_MISMATCH` (added alongside this hardening pass) fires
 when a correlation's declared `decision_id` disagrees with the Decision its
@@ -248,9 +249,15 @@ new one) and compares the overlap:
   independently and successfully consumed at two different enforcement
   points.
 - **`CROSS_RUNTIME_POST_REVOCATION_VALIDITY`** — a permit is `outcome:
-  verified` in one export at a timestamp *after* the **other** export's real
-  `revoked_at` for the same `permit_token_hash`. Revocation-propagation lag
-  made visible, not resolved — this reports; it never revokes, retracts, or
+  verified` in one export at a timestamp **more than the accepted
+  cross-runtime clock-uncertainty tolerance (±50ms, pinned to ADR-022's
+  NTP-drift figure — atlasent-verify#30)** *after* the **other** export's
+  real `revoked_at` for the same `permit_token_hash`. A gap at or under the
+  tolerance (including exactly at 50ms) is ordinary clock disagreement
+  between two independently-NTP-disciplined instances, not a finding — see
+  `earliestValidAfter`/`clockUncertaintyTolerance` in
+  `internal/reconcile/reconcile.go`. Revocation-propagation lag made
+  visible, not resolved — this reports; it never revokes, retracts, or
   pushes state between instances.
 - **`RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE`** — the
   `outcome: revoked` row for a permit under comparison carries no usable
@@ -258,23 +265,65 @@ new one) and compares the overlap:
   malformed). Refused for that specific pair — **never silently skipped and
   never approximated from `verified_at`**, even when `verified_at` is
   present on the same row.
-- **`absent`** (a SUCCESS, not an error) — both exports verify
-  independently, scopes match, but there is **no** overlapping
-  `permit_token_hash` at all: the expected steady state for two
-  correctly-operating, disjoint instances. Exactly the posture the
-  correlation/archive layers already use for their own zero-record
-  `absent` states.
-- An overlap with no finding is `verified` — something was actually
-  compared and came out clean, distinct from `absent` (nothing to compare).
+- **`RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE`** (atlasent-verify#30)
+  — fires whenever the full comparison ran and raised **no** finding (what
+  would otherwise be `absent` or `verified`), but the producer's export
+  cannot attest that its `verification_events[]` are the complete,
+  authoritative revocation/consumption record for that scope. **A clean
+  overlap or no-overlap result is never itself proof that no cross-runtime
+  conflict exists** — see "Evidence completeness" below. This does not
+  affect a genuine finding: `CROSS_RUNTIME_DUPLICATE_CONSUMPTION`,
+  `CROSS_RUNTIME_POST_REVOCATION_VALIDITY`, and
+  `RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE` are real positive
+  detections and stand regardless of completeness — only the *absence* of a
+  finding is what completeness bears on.
 
-`reconciliation_integrity` — `verified` / `invalid` / `absent` / `refused` —
-is reported as a **fifth** line in `--json` output, alongside a `deployment_id`
-/ `org_id` echo (once scope matches) and `overlapping_permit_token_hashes`.
-Because reconciliation spans two files, `--json` output for a
-`--reconcile-with` run wraps both sides' independent `VerificationResult`s
-plus the reconciliation `Result`: `{"a": {...}, "b": {...}, "reconciliation":
-{...}}` — the single-file `--json` shape (used whenever `--reconcile-with` is
-absent) is completely unchanged.
+`reconciliation_integrity` — `verified` / `invalid` / `absent` / `refused` /
+`unavailable` — is reported as a **fifth** line in `--json` output, alongside
+a `deployment_id` / `org_id` echo (once scope matches) and
+`overlapping_permit_token_hashes`. Because reconciliation spans two files,
+`--json` output for a `--reconcile-with` run wraps both sides' independent
+`VerificationResult`s plus the reconciliation `Result`: `{"a": {...}, "b":
+{...}, "reconciliation": {...}}` — the single-file `--json` shape (used
+whenever `--reconcile-with` is absent) is completely unchanged.
+
+#### Evidence completeness (atlasent-verify#30, atlasent-docs#648)
+
+**`verified` and `absent` are not reachable under today's wire contract.**
+"Nothing found" (no overlap at all, or a clean overlap) is reported as
+`unavailable`, not `absent`/`verified`, and `Result.OK()` is `false` for
+`unavailable` — the CLI exits non-zero and `--require-signatures` reports
+`NOT ACCEPTED` even when both exports' own signatures verify against a
+trusted key. This is deliberate, not a regression: `atlasent-docs#648` (P1,
+open — founder/architecture disposition pending) found that the current
+`v1-export-audit` wire contract has no field that could attest
+`verification_events[]` is the complete, authoritative revocation/consumption
+record for an org, for two independent reasons —
+
+1. The certified-copy manifest's `record_counts.verification_events` (see
+   "Certification version gate" above) only proves the exported array
+   matches the **producer's own claimed count** for that export — i.e. it
+   was not truncated relative to what the producer intended to include. It
+   says nothing about whether that claimed set is the complete universe of
+   consumption/revocation events for the org: a scoped or windowed export is
+   a legitimate, normal shape, and `Certification` is itself optional.
+2. ADR-059 permits verification-event **recording itself** to fail open
+   after a successful consumption, so a byte-perfect, fully self-consistent,
+   fully-signature-verified export can legitimately omit a real consumption
+   or revocation event that was never persisted in the first place. No count
+   check can catch a row that was never written.
+
+Per #648's own instruction ("do not implement a success-producing
+cross-runtime absence check from verification-event exports alone... until
+[completeness is] decided"), `internal/reconcile`'s
+`evidenceCompletenessProven` always returns `false` today — **do not** treat
+a matching `Certification`, a present `reconciliation_scope`, or any other
+existing field as sufficient completeness evidence; none of them attest to
+the specific guarantee this gate requires (verified directly:
+`TestReconcile_EvidenceCompleteness_UnaffectedByCertificationPresence`).
+`evidenceCompletenessProven` is the single, clearly-marked seam for when the
+producer contract eventually adds a real attestation — every other caller in
+the package already honors whatever it reports.
 
 **V1 scope, deliberately narrow (do not silently expand):** strictly
 pairwise (no N-way topology), no live network path, no discovery mechanism
@@ -480,7 +529,22 @@ internal/keys/                PEM keystore (kid → ed25519.PublicKey)
   `verification_events[].revoked_at` (the real revocation moment) — never
   `verified_at` (a re-presentation attempt time); when a revoked row has no
   usable `revoked_at`, refuse (`RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE`)
-  rather than approximate.
+  rather than approximate. That comparison tolerates gaps at or under
+  `clockUncertaintyTolerance` (±50ms, ADR-022) as ordinary cross-instance
+  clock disagreement — never widen this to mask a real violation, and never
+  narrow it to flag ordinary NTP drift as a finding; both directions are
+  pinned by boundary tests in `internal/reconcile/reconcile_test.go`.
+- **A "nothing found" reconciliation result is not proof of no conflict
+  (atlasent-verify#30, atlasent-docs#648)** — `VerdictVerified`/`VerdictAbsent`
+  are not reachable under today's wire contract; every no-finding comparison
+  reports `VerdictUnavailable` (`Result.OK()` false) instead, via
+  `evidenceCompletenessProven`, which always returns `false` until the
+  producer contract can attest `verification_events[]` is complete and
+  authoritative. Do not treat a matching `Certification` record count, or any
+  other existing field, as sufficient completeness evidence to reintroduce a
+  `verified`/`absent` shortcut — see "Evidence completeness" above for why
+  neither is sufficient. A genuine finding is unaffected by this gate and
+  still reports `VerdictInvalid`.
 
 ## Branch convention
 

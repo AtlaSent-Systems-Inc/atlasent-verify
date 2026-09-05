@@ -20,7 +20,12 @@
 // real verification_events.revoked_at, never verified_at):
 //
 //	reconcile-disjoint-{a,b}.json   scope matches, NO overlapping
-//	                                permit_token_hash -> reconciliation_integrity=absent (SUCCESS)
+//	                                permit_token_hash -> reconciliation_integrity=unavailable
+//	                                (atlasent-verify#30: a no-overlap result is
+//	                                no longer presented as proof of no conflict
+//	                                under today's wire contract — see
+//	                                evidenceCompletenessProven in
+//	                                internal/reconcile/reconcile.go)
 //	reconcile-duplicate-{a,b}.json  same permit_token_hash outcome=verified
 //	                                in BOTH -> CROSS_RUNTIME_DUPLICATE_CONSUMPTION
 //	reconcile-revoked-{a,b}.json    A revokes (revoked_at set — deliberately

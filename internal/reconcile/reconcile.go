@@ -4,9 +4,30 @@
 // (internal/envelope's envelope/ledger/correlation/archive layers), following
 // exactly the pattern internal/envelope/correlation.go and
 // internal/envelope/archive.go set for adding a layer without reinventing the
-// posture: reuse the "absent is a SUCCESS" convention, reuse the
-// findings-with-a-record-ref shape, reuse the certification-version-style
-// fail-closed-on-the-unrecognized-shape instinct.
+// posture: reuse the findings-with-a-record-ref shape, reuse the
+// certification-version-style fail-closed-on-the-unrecognized-shape instinct.
+//
+// EVIDENCE COMPLETENESS (atlasent-verify#30, atlasent-docs#648)
+// ---------------------------------------------------------------
+// Unlike internal/envelope's correlation/archive layers, "nothing found" is
+// NOT unconditionally a SUCCESS here. A clean overlap (VerdictVerified) or no
+// overlap at all (VerdictAbsent) can only be presented as "no cross-runtime
+// conflict exists" if the compared verification_events[] are themselves
+// known to be the complete, authoritative revocation/consumption record for
+// their scope. The current v1-export-audit wire contract does not attest to
+// that (see evidenceCompletenessProven's doc) — atlasent-docs#648 found that
+// ADR-059 lets verification-event recording fail open after a successful
+// consumption, so a byte-perfect, fully-signed export can still be missing
+// the very row that would show a conflict. Per #648's own instruction ("do
+// not implement a success-producing cross-runtime absence check from
+// verification-event exports alone... until [completeness is] decided") and
+// this repo's no-fabrication rule, a "nothing found" result is reported as
+// VerdictUnavailable, not VerdictVerified/VerdictAbsent, until the producer
+// contract can prove otherwise. A genuine FINDING (duplicate consumption,
+// post-revocation validity, an unusable revocation timestamp) is unaffected
+// by this — a positive detection is real evidence regardless of whether the
+// exports are provably complete elsewhere; only the ABSENCE of a finding is
+// what completeness bears on.
 //
 // WHAT THIS PACKAGE DOES NOT DO
 // ------------------------------
@@ -80,7 +101,36 @@ const (
 	// re-presentation can happen long after the actual revocation, or never
 	// at all).
 	CodeRevocationTimestampUnavailable FailureCode = "RECONCILIATION_REVOCATION_TIMESTAMP_UNAVAILABLE"
+
+	// CodeEvidenceCompletenessUnavailable fires whenever a comparison would
+	// otherwise report VerdictVerified or VerdictAbsent (no finding raised
+	// over the matched scope) but the producer's export cannot attest that
+	// its verification_events[] are the complete, authoritative
+	// revocation/consumption record for that scope. See
+	// evidenceCompletenessProven's doc and atlasent-docs#648. This is
+	// distinct from CodeScopeMismatch (refused before any record-level
+	// comparison was even attempted) and from CodeRevocationTimestampUnavailable
+	// (a specific row's timestamp can't be trusted) — this fires only after
+	// the full comparison ran and found nothing, when the ABSENCE of a
+	// finding is what cannot be trusted.
+	CodeEvidenceCompletenessUnavailable FailureCode = "RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE"
 )
+
+// clockUncertaintyTolerance is the accepted cross-runtime clock-uncertainty
+// window applied to CROSS_RUNTIME_POST_REVOCATION_VALIDITY's timestamp
+// ordering. Pinned to ADR-022's ±50ms NTP-drift figure (atlasent-docs
+// architecture/adr/ADR-022-clock-authority-and-skew-handling.md, "Maximum
+// acceptable drift: ±50ms under normal operation") per issue #30's own
+// acceptance criterion ("the accepted cross-runtime clock-uncertainty rule
+// (±50 ms)") and the PR #26 review that named it. Two independently-operated,
+// independently-NTP-disciplined runtime instances can disagree about "now" by
+// up to this much without that disagreement being evidence of a real
+// post-revocation-validity ordering problem — see checkDirection /
+// earliestValidAfter, the only place this is applied. A `validAt` reading
+// strictly MORE than this far after the other export's `revoked_at` is what
+// counts as a genuine ordering violation; a gap at or under this tolerance is
+// ordinary clock disagreement, not a finding.
+const clockUncertaintyTolerance = 50 * time.Millisecond
 
 // outcomeValid / outcomeRevoked are the two verification_events.outcome
 // values reconciliation cares about. The CHECK constraint on
@@ -106,23 +156,37 @@ type Verdict string
 
 const (
 	// VerdictVerified: both exports verify independently, scopes match, at
-	// least one permit_token_hash overlaps, and every overlap is coherent
-	// (no duplicate consumption, no post-revocation validity).
+	// least one permit_token_hash overlaps, every overlap is coherent (no
+	// duplicate consumption, no post-revocation validity), AND the producer's
+	// evidence is known to be complete enough for that clean result to mean
+	// something (see evidenceCompletenessProven — NOT reachable with today's
+	// wire contract; every clean-overlap run reports VerdictUnavailable
+	// instead until that changes).
 	VerdictVerified Verdict = "verified"
 	// VerdictInvalid: scopes match, but at least one finding was raised over
-	// an overlapping permit_token_hash.
+	// an overlapping permit_token_hash. Unaffected by evidence completeness —
+	// a genuine positive detection is real evidence regardless.
 	VerdictInvalid Verdict = "invalid"
-	// VerdictAbsent: scopes match and both exports verify independently, but
-	// there is NO overlapping permit_token_hash at all — the expected
-	// steady state for two correctly-operating, disjoint instances. A
-	// SUCCESS, not an error — exactly the posture internal/envelope's
-	// correlation/archive layers already use for their own "absent" states.
+	// VerdictAbsent: scopes match, both exports verify independently, there
+	// is NO overlapping permit_token_hash at all, AND the producer's evidence
+	// is known to be complete enough for that to mean something (see
+	// VerdictVerified's note — same caveat, same current unreachability).
 	VerdictAbsent Verdict = "absent"
 	// VerdictRefused: the scope-match gate itself failed (missing
 	// reconciliation_scope on either side, or a declared org_id/deployment_id
 	// disagreement) — refused before any record-level comparison was
 	// attempted.
 	VerdictRefused Verdict = "refused"
+	// VerdictUnavailable: scopes matched and the full record-level comparison
+	// ran and raised no finding (what would otherwise be VerdictVerified or
+	// VerdictAbsent), but the producer's export cannot attest that its
+	// verification_events[] are the complete, authoritative
+	// revocation/consumption record for that scope — so the absence of a
+	// finding cannot be presented as proof that no cross-runtime conflict
+	// exists (atlasent-verify#30, atlasent-docs#648). This is the current,
+	// fail-closed outcome for every export produced under today's wire
+	// contract; see evidenceCompletenessProven.
+	VerdictUnavailable Verdict = "unavailable"
 )
 
 // MarshalJSON emits the stable wire vocabulary the ADR names: "verified" /
@@ -142,6 +206,8 @@ func (v Verdict) MarshalJSON() ([]byte, error) {
 		return []byte(`"absent"`), nil
 	case VerdictRefused:
 		return []byte(`"refused"`), nil
+	case VerdictUnavailable:
+		return []byte(`"unavailable"`), nil
 	default:
 		return []byte(`"unknown"`), nil
 	}
@@ -189,9 +255,13 @@ func (r *Result) AddFinding(code FailureCode, record, detail string) {
 	r.Findings = append(r.Findings, Finding{Code: code, Detail: detail, Record: record})
 }
 
-// OK reports a clean reconciliation pass: verified or absent, never invalid
-// or refused. Mirrors envelope.VerificationResult.OK()'s "no findings, no
-// invalid layer" shape, adjusted for reconcile's extra "refused" state.
+// OK reports a clean reconciliation pass: verified or absent, never invalid,
+// refused, or unavailable. Mirrors envelope.VerificationResult.OK()'s "no
+// findings, no invalid layer" shape, adjusted for reconcile's extra
+// "refused"/"unavailable" states — both fail-closed, neither a pass. As of
+// atlasent-verify#30, VerdictVerified/VerdictAbsent are not reachable under
+// today's wire contract (see evidenceCompletenessProven), so OK() cannot
+// currently return true for a real export; this is intentional, not a bug.
 func (r *Result) OK() bool {
 	return r.ReconciliationIntegrity == VerdictVerified || r.ReconciliationIntegrity == VerdictAbsent
 }
@@ -208,10 +278,19 @@ func (r *Result) OK() bool {
 // never treated as "compare anyway".
 //
 // Step 2 — over the matched scope, index each export's verification_events[]
-// by permit_token_hash and find the overlap. No overlap is VerdictAbsent (a
-// SUCCESS): the expected steady state for two correctly-operating, disjoint
-// instances. An overlap with no finding is VerdictVerified. An overlap with
-// at least one finding is VerdictInvalid.
+// by permit_token_hash and find the overlap, then run the two finding checks
+// over every overlapping hash. Any finding (duplicate consumption,
+// post-revocation validity, or an unusable revocation timestamp) makes the
+// result VerdictInvalid — a genuine positive detection, unaffected by
+// evidence completeness.
+//
+// Step 3 — if NO finding was raised (what would otherwise be VerdictAbsent
+// for no overlap, or VerdictVerified for a clean overlap), gate on evidence
+// completeness (evidenceCompletenessProven): today's wire contract can never
+// prove it, so the result is VerdictUnavailable with
+// CodeEvidenceCompletenessUnavailable instead — the absence of a finding is
+// exactly what completeness bears on; do not read this as a regression from
+// an earlier "absent is free" design, it is the atlasent-verify#30 fix.
 func Reconcile(a, b *envelope.Envelope) *Result {
 	res := &Result{ReconciliationIntegrity: VerdictAbsent}
 
@@ -253,14 +332,6 @@ func Reconcile(a, b *envelope.Envelope) *Result {
 
 	overlap := overlappingHashes(aRows, bRows)
 	res.OverlappingPermitTokenHashes = len(overlap)
-	if len(overlap) == 0 {
-		// SUCCESS, not an error: genuinely disjoint action streams is the
-		// normal case for two correctly-operating instances, exactly the
-		// posture internal/envelope's correlation/archive layers use for
-		// their own zero-record "absent" states.
-		res.ReconciliationIntegrity = VerdictAbsent
-		return res
-	}
 
 	for _, h := range overlap {
 		checkDuplicateConsumption(h, aRows[h], bRows[h], res)
@@ -268,11 +339,77 @@ func Reconcile(a, b *envelope.Envelope) *Result {
 	}
 
 	if len(res.Findings) > 0 {
+		// A genuine positive detection stands on its own regardless of
+		// whether the exports' evidence is provably complete elsewhere — an
+		// actual duplicate-consumption or post-revocation record found IS
+		// real evidence. Only the ABSENCE of a finding (below) is what
+		// evidence completeness bears on.
 		res.ReconciliationIntegrity = VerdictInvalid
-	} else {
-		res.ReconciliationIntegrity = VerdictVerified
+		return res
 	}
+
+	// ── (3) evidence-completeness gate ────────────────────────────────────
+	// Nothing was found — either genuinely disjoint action streams (overlap
+	// == 0) or a clean overlap. Neither may be presented as proof that no
+	// cross-runtime conflict exists unless the producer's export is known to
+	// carry the complete, authoritative revocation/consumption record for
+	// this scope. See evidenceCompletenessProven.
+	if proven, reason := evidenceCompletenessProven(a, b); !proven {
+		res.ReconciliationIntegrity = VerdictUnavailable
+		res.AddFinding(CodeEvidenceCompletenessUnavailable, "", reason)
+		return res
+	}
+
+	if len(overlap) == 0 {
+		res.ReconciliationIntegrity = VerdictAbsent
+		return res
+	}
+	res.ReconciliationIntegrity = VerdictVerified
 	return res
+}
+
+// evidenceCompletenessProven reports whether the given pair of
+// already-independently-verified exports can be trusted to carry the
+// COMPLETE, AUTHORITATIVE revocation/consumption record needed for a clean
+// reconciliation result (VerdictVerified / VerdictAbsent) to mean "no
+// cross-runtime conflict exists," rather than merely "no conflict was found
+// in what happened to be exported."
+//
+// This always returns false today, deliberately and unconditionally.
+// atlasent-docs#648 (P1, filed 2026-08-31, open — founder/architecture
+// disposition pending) found that the current v1-export-audit wire contract
+// has no field that could establish this:
+//
+//   - The certified-copy manifest's record_counts.verification_events
+//     (checked by internal/envelope's checkCertificationCounts) only proves
+//     the exported array matches the PRODUCER'S OWN CLAIMED count for this
+//     export — i.e. it was not truncated relative to what the producer
+//     intended to include. It says nothing about whether that claimed set is
+//     the complete universe of consumption/revocation events for the org: a
+//     scoped or windowed export is a legitimate, normal shape (see
+//     internal/envelope/ledger.go's "an export is a time-window" doctrine),
+//     and a Certification section is itself optional — an uncertified bundle
+//     is a normal, valid export with no count claim to check at all.
+//   - #648 point 2 is sharper still: ADR-059 permits verification-event
+//     RECORDING ITSELF to fail open after a successful consumption, so a
+//     byte-perfect, fully self-consistent, fully-signature-verified export
+//     can legitimately omit a real consumption or revocation event that was
+//     never persisted in the first place. No count check, however strict,
+//     can catch a row that was never written.
+//
+// Per #648's own instruction ("do not implement a success-producing
+// cross-runtime absence check from verification-event exports alone... until
+// [the completeness/skew decisions are] decided") and this repo's
+// no-fabrication rule, this function must not invent a completeness signal
+// that does not exist on the wire — it takes both envelopes as parameters
+// precisely so that the day the producer contract adds a real attestation
+// (the disposition #648 is waiting on), this is the one place that needs to
+// change; every caller in this package is already written to honor whatever
+// it reports.
+//
+//nolint:revive,unparam // a, b intentionally unused today — see doc above.
+func evidenceCompletenessProven(a, b *envelope.Envelope) (bool, string) {
+	return false, "the v1-export-audit wire contract does not yet attest that verification_events[] is the complete, authoritative revocation/consumption record for either export (atlasent-docs#648, open); a clean overlap or no-overlap reconciliation result cannot be presented as proof that no cross-runtime conflict exists"
 }
 
 // indexByPermit groups verification_events rows by permit_token_hash. A
@@ -323,12 +460,15 @@ func checkDuplicateConsumption(hash string, aRows, bRows []envelope.Verification
 
 // checkPostRevocationValidity reports CodePostRevocationValidity when the
 // same permit_token_hash is outcome=verified in one export at a timestamp
-// AFTER the OTHER export's real revocation moment (revoked_at, NOT
-// verified_at — see ADR CROSS-043 §2's own correction: verified_at on a
-// revoked row is a rejected-presentation ATTEMPT time, which may postdate the
-// real revocation by an arbitrary amount, or never occur at all) for that
-// same hash. Checked in both directions (A revoked before B's valid; B
-// revoked before A's valid) since neither instance is privileged.
+// MORE THAN clockUncertaintyTolerance (±50ms, ADR-022) AFTER the OTHER
+// export's real revocation moment (revoked_at, NOT verified_at — see ADR
+// CROSS-043 §2's own correction: verified_at on a revoked row is a
+// rejected-presentation ATTEMPT time, which may postdate the real revocation
+// by an arbitrary amount, or never occur at all) for that same hash. A gap at
+// or under the tolerance is ordinary cross-instance clock disagreement, not a
+// finding — see earliestValidAfter. Checked in both directions (A revoked
+// before B's valid; B revoked before A's valid) since neither instance is
+// privileged.
 //
 // When a side DOES record the permit as revoked but that row carries no
 // usable revoked_at (an export produced before ADR CROSS-043 §2's field
@@ -417,7 +557,12 @@ func earliestRevokedAt(revoked []envelope.VerificationRow) (envelope.Verificatio
 }
 
 // earliestValidAfter returns the outcome=verified row with the EARLIEST
-// parseable verified_at strictly after `after`, and that timestamp.
+// parseable verified_at that is MORE THAN clockUncertaintyTolerance (±50ms)
+// after `after`, and that timestamp. A verified_at at or under the tolerance
+// past `after` (including exactly AT the tolerance boundary) is treated as
+// ordinary cross-instance clock disagreement, not a candidate — see
+// clockUncertaintyTolerance's doc. A verified_at at or before `after` is, as
+// always, not "after" at all and is excluded regardless of tolerance.
 func earliestValidAfter(rows []envelope.VerificationRow, after time.Time) (envelope.VerificationRow, time.Time, bool) {
 	var best envelope.VerificationRow
 	var bestAt time.Time
@@ -427,7 +572,7 @@ func earliestValidAfter(rows []envelope.VerificationRow, after time.Time) (envel
 			continue
 		}
 		t, ok := parseTimestamp(r.VerifiedAt)
-		if !ok || !t.After(after) {
+		if !ok || t.Sub(after) <= clockUncertaintyTolerance {
 			continue
 		}
 		if !found || t.Before(bestAt) {

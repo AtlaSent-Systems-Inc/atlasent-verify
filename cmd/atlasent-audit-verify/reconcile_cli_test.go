@@ -65,24 +65,32 @@ func reconcileKeyfile(t *testing.T, fixtures ...string) string {
 	return path
 }
 
-func TestCLIReconcile_Disjoint_Absent(t *testing.T) {
+// TestCLIReconcile_Disjoint_Unavailable was TestCLIReconcile_Disjoint_Absent
+// before atlasent-verify#30: the disjoint fixture (no overlapping
+// permit_token_hash) used to report a clean VerdictAbsent/exit 0. It now
+// reports VerdictUnavailable/exit 1 — a no-overlap result cannot be presented
+// as proof that no cross-runtime conflict exists when the producer's export
+// carries no completeness attestation (atlasent-docs#648). See
+// internal/reconcile's evidence-completeness test block for the underlying
+// logic this exercises end-to-end.
+func TestCLIReconcile_Disjoint_Unavailable(t *testing.T) {
 	a, b := reconcileFixture("disjoint")
 	keys := reconcileKeyfile(t, a, b)
 	stdout, code := run(t, "--chain", a, "--keys", keys, "--reconcile-with", b)
-	if code != 0 {
-		t.Fatalf("exit=%d\n%s", code, stdout)
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 (a no-overlap result is no longer a clean pass)\n%s", code, stdout)
 	}
 	for _, want := range []string{
 		"Reconciliation integrity (ADR CROSS-043, cross-runtime)",
-		"absent (org_id=org-recon-fixture-0001 deployment_id=dep-recon-fixture-0001",
-		"no overlapping permit_token_hash",
+		"unavailable (org_id=org-recon-fixture-0001 deployment_id=dep-recon-fixture-0001",
+		"RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("missing %q in:\n%s", want, stdout)
 		}
 	}
 	if strings.Contains(stdout, "RECONCILIATION_SCOPE_MISMATCH") || strings.Contains(stdout, "CROSS_RUNTIME") {
-		t.Errorf("absent case must carry no findings:\n%s", stdout)
+		t.Errorf("this fixture has no overlap and no scope mismatch — only the completeness finding should fire:\n%s", stdout)
 	}
 }
 
@@ -90,8 +98,8 @@ func TestCLIReconcile_Disjoint_JSONShape(t *testing.T) {
 	a, b := reconcileFixture("disjoint")
 	keys := reconcileKeyfile(t, a, b)
 	stdout, code := run(t, "--chain", a, "--keys", keys, "--reconcile-with", b, "--json")
-	if code != 0 {
-		t.Fatalf("exit=%d\n%s", code, stdout)
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 (a no-overlap result is no longer a clean pass — atlasent-verify#30)\n%s", code, stdout)
 	}
 	var out struct {
 		A struct {
@@ -105,7 +113,9 @@ func TestCLIReconcile_Disjoint_JSONShape(t *testing.T) {
 			OrgID                        string `json:"org_id"`
 			DeploymentID                 string `json:"deployment_id"`
 			OverlappingPermitTokenHashes int    `json:"overlapping_permit_token_hashes"`
-			Findings                     []any  `json:"findings"`
+			Findings                     []struct {
+				Code string `json:"code"`
+			} `json:"findings"`
 		} `json:"reconciliation"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
@@ -114,8 +124,8 @@ func TestCLIReconcile_Disjoint_JSONShape(t *testing.T) {
 	if out.A.EnvelopeIntegrity != "verified" || out.B.EnvelopeIntegrity != "verified" {
 		t.Errorf("both sides' own envelope_integrity must independently verify: a=%q b=%q", out.A.EnvelopeIntegrity, out.B.EnvelopeIntegrity)
 	}
-	if out.Reconciliation.ReconciliationIntegrity != "absent" {
-		t.Errorf("reconciliation_integrity = %q, want absent", out.Reconciliation.ReconciliationIntegrity)
+	if out.Reconciliation.ReconciliationIntegrity != "unavailable" {
+		t.Errorf("reconciliation_integrity = %q, want unavailable", out.Reconciliation.ReconciliationIntegrity)
 	}
 	if out.Reconciliation.OrgID != "org-recon-fixture-0001" || out.Reconciliation.DeploymentID != "dep-recon-fixture-0001" {
 		t.Errorf("scope not echoed correctly: %+v", out.Reconciliation)
@@ -123,8 +133,8 @@ func TestCLIReconcile_Disjoint_JSONShape(t *testing.T) {
 	if out.Reconciliation.OverlappingPermitTokenHashes != 0 {
 		t.Errorf("overlap = %d, want 0", out.Reconciliation.OverlappingPermitTokenHashes)
 	}
-	if len(out.Reconciliation.Findings) != 0 {
-		t.Errorf("findings = %v, want none", out.Reconciliation.Findings)
+	if len(out.Reconciliation.Findings) != 1 || out.Reconciliation.Findings[0].Code != "RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE" {
+		t.Errorf("findings = %+v, want exactly one RECONCILIATION_EVIDENCE_COMPLETENESS_UNAVAILABLE", out.Reconciliation.Findings)
 	}
 }
 
@@ -366,18 +376,29 @@ func TestCLIReconcile_MissingReconcileWithFile(t *testing.T) {
 	}
 }
 
-// TestCLIReconcile_RequireSignaturesStrictAcceptance proves --require-signatures
-// composes correctly with --reconcile-with: BOTH sides must verify against a
-// TRUSTED key, and reconciliation must also be clean, for ACCEPTED.
-func TestCLIReconcile_RequireSignaturesStrictAcceptance(t *testing.T) {
+// TestCLIReconcile_RequireSignaturesStrictAcceptance_UnavailableIsNotAccepted
+// (was TestCLIReconcile_RequireSignaturesStrictAcceptance before
+// atlasent-verify#30, when the disjoint fixture reported a clean
+// VerdictAbsent). --require-signatures composes with --reconcile-with by
+// requiring recRes.OK() alongside both sides' StrictOK() (see main.go's
+// runEnvelopeReconcile) — and recRes.OK() is false for VerdictUnavailable, so
+// this now correctly reports NOT ACCEPTED even though both exports'
+// signatures verify against a trusted key. Strict acceptance for
+// reconciliation is not reachable by ANY export under today's wire contract
+// (see evidenceCompletenessProven) — that is the intended fail-closed
+// posture, not a bug in this test.
+func TestCLIReconcile_RequireSignaturesStrictAcceptance_UnavailableIsNotAccepted(t *testing.T) {
 	a, b := reconcileFixture("disjoint")
 	keys := reconcileKeyfile(t, a, b)
 	stdout, code := run(t, "--chain", a, "--keys", keys, "--reconcile-with", b, "--require-signatures")
-	if code != 0 {
-		t.Fatalf("exit=%d, want 0\n%s", code, stdout)
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 (reconciliation_integrity=unavailable is not OK() even under trusted signatures)\n%s", code, stdout)
 	}
-	if !strings.Contains(stdout, "ACCEPTED (--require-signatures)") {
-		t.Errorf("missing ACCEPTED line; out=%q", stdout)
+	if !strings.Contains(stdout, "NOT ACCEPTED (--require-signatures)") {
+		t.Errorf("missing NOT ACCEPTED line; out=%q", stdout)
+	}
+	if !strings.Contains(stdout, "reconciliation_integrity=unavailable") {
+		t.Errorf("NOT ACCEPTED line should name the reconciliation verdict; out=%q", stdout)
 	}
 }
 
@@ -396,16 +417,21 @@ func TestCLIReconcile_RequireSignaturesFailsOnReconciliationFinding(t *testing.T
 	}
 }
 
+// TestCLIReconcile_JSONRequireSignaturesRemainsValidJSON exercises the
+// evidence-completeness fail-closed path (exit 1, verdict "unavailable") —
+// the disjoint fixture no longer produces exit 0 as of atlasent-verify#30 —
+// and confirms #31's JSON-preservation fix holds here too: stdout must still
+// be exactly one JSON value even on this NOT ACCEPTED outcome.
 func TestCLIReconcile_JSONRequireSignaturesRemainsValidJSON(t *testing.T) {
 	a, b := reconcileFixture("disjoint")
 	keys := reconcileKeyfile(t, a, b)
 	stdout, code := run(t, "--chain", a, "--keys", keys, "--reconcile-with", b, "--require-signatures", "--json")
-	if code != 0 {
-		t.Fatalf("exit=%d, want 0\n%s", code, stdout)
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 (unavailable is not accepted)\n%s", code, stdout)
 	}
 	var out map[string]any
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
-		t.Fatalf("strict-mode stdout must be exactly one JSON value: %v\n%s", err, stdout)
+		t.Fatalf("strict-mode stdout must be exactly one JSON value even on a NOT ACCEPTED outcome: %v\n%s", err, stdout)
 	}
 }
 
