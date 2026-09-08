@@ -87,3 +87,67 @@ func TestLedgerEntryHashTamperedButPayloadUnchanged(t *testing.T) {
 		t.Fatalf("want LEDGER_HASH_MISMATCH; ledger=%s findings=%+v", res.LedgerIntegrity, res.Findings)
 	}
 }
+
+// TestLedgerMalformedRowFailsClosed: a row whose canonical_payload carries the
+// wrong JSON TYPE (a number, not a string) is not the "content is wrong" case
+// covered by LEDGER_HASH_MISMATCH above — the row can't even be decoded into
+// the shape verifyLedger expects. This exercises CodeLedgerMalformed, which
+// previously had zero test coverage anywhere in this repo (go test -cover
+// showed 0% for this branch) despite being a real, wired FailureCode a
+// producer bug or a tampered export can genuinely trigger. The bundle is
+// still correctly re-signed over the malformed bytes, so the outer envelope
+// signature legitimately passes — this must fail closed at the ledger layer
+// specifically, not silently skip the bad row or panic.
+func TestLedgerMalformedRowFailsClosed(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	row := mkEval("d1", "allow", "ph1", "")
+	row["canonical_payload"] = 12345 // wrong JSON type: number, not string
+
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1", []map[string]any{row}, nil, nil)
+	res, err := Verify(wire, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EnvelopeIntegrity != LayerValid {
+		t.Fatalf("envelope must still verify (it was signed over the malformed row's real bytes): %s", res.EnvelopeIntegrity)
+	}
+	if res.LedgerIntegrity != LayerInvalid || !hasCode(res, CodeLedgerMalformed) {
+		t.Fatalf("want LEDGER_MALFORMED; ledger=%s findings=%+v", res.LedgerIntegrity, res.Findings)
+	}
+	if res.LedgerEntriesVerified != 0 {
+		t.Errorf("a malformed row must verify zero entries, got %d", res.LedgerEntriesVerified)
+	}
+}
+
+// TestLedgerMalformedRowDoesNotCreditEarlierGoodRows: the malformed row is
+// second in a two-row ledger. A partial-credit implementation might report
+// the first (genuinely valid) row as verified before bailing on the second;
+// verifyLedger's actual contract is to report zero on any malformed row, not
+// "verified up to the point of failure" — pin that here so a future change
+// can't silently start awarding partial credit for a ledger this tool cannot
+// fully vouch for.
+func TestLedgerMalformedRowDoesNotCreditEarlierGoodRows(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	row0 := mkEval("d1", "allow", "ph1", "")
+	row1 := mkEval("d2", "allow", "ph2", row0["entry_hash"].(string))
+	row1["id"] = 999 // wrong JSON type: number, not string
+
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1", []map[string]any{row0, row1}, nil, nil)
+	res, err := Verify(wire, memKeys{"eks_test": pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LedgerIntegrity != LayerInvalid || !hasCode(res, CodeLedgerMalformed) {
+		t.Fatalf("want LEDGER_MALFORMED; ledger=%s findings=%+v", res.LedgerIntegrity, res.Findings)
+	}
+	if res.LedgerEntriesVerified != 0 {
+		t.Errorf("a malformed row must not credit an earlier well-formed row, got %d verified", res.LedgerEntriesVerified)
+	}
+	// The finding must name the malformed row by its position, not the first
+	// (unrelated, well-formed) row.
+	for _, f := range res.Findings {
+		if f.Code == CodeLedgerMalformed && f.Record != "evaluations[1]" {
+			t.Errorf("want the finding to reference evaluations[1], got %q", f.Record)
+		}
+	}
+}
