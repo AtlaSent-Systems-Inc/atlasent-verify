@@ -82,6 +82,7 @@ that backs the CLI's honest Permit / Observation / Correlation lifecycle lines
 
 Machine-readable failure codes: `ENVELOPE_SIGNATURE_INVALID`,
 `UNSUPPORTED_ENVELOPE_VERSION`, `LEDGER_HASH_MISMATCH`, `LEDGER_CHAIN_BROKEN`,
+`LEDGER_MALFORMED`,
 `CORRELATION_REFERENCE_MISSING`, `CORRELATION_REFERENCE_OUTSIDE_EXPORT`,
 `CORRELATION_ORG_MISMATCH`, `CORRELATION_ACTION_MISMATCH`,
 `CORRELATION_TARGET_MISMATCH`, `CORRELATION_DECISION_MISMATCH`,
@@ -90,7 +91,17 @@ Machine-readable failure codes: `ENVELOPE_SIGNATURE_INVALID`,
 `ARCHIVE_REFERENCE_MISSING`, `ARCHIVE_REFERENCE_OUTSIDE_EXPORT`,
 `ARCHIVE_ORG_MISMATCH`, `ARCHIVE_DUPLICATE`, `ARCHIVE_CONFLICT`,
 `ARCHIVE_OUTCOME_UNKNOWN`, `UNSUPPORTED_CERTIFICATION_VERSION`,
-`CERTIFICATION_COUNT_MISMATCH`. The fifth, cross-envelope reconciliation
+`CERTIFICATION_COUNT_MISMATCH`, `CERTIFICATION_BUNDLE_HASH_MISMATCH`.
+`LEDGER_MALFORMED` fires when an `evaluations[]` row cannot even be decoded
+into the shape the ledger check expects (e.g. `canonical_payload` or `id`
+carries the wrong JSON type) — distinct from `LEDGER_HASH_MISMATCH`, where the
+row decodes fine but its content doesn't recompute the claimed hash.
+`CERTIFICATION_BUNDLE_HASH_MISMATCH` fires when recomputing
+`certification.bundle_sha256` over the producer's exact canonical
+record-section object disagrees with the manifest's declared value (see
+"Certification version gate" below) — distinct from
+`CERTIFICATION_COUNT_MISMATCH`, which is a record-count census mismatch, not a
+byte-accuracy one. The fifth, cross-envelope reconciliation
 layer (ADR CROSS-043, `--reconcile-with`) registers its own separate family —
 `RECONCILIATION_SCOPE_MISMATCH`, `CROSS_RUNTIME_DUPLICATE_CONSUMPTION`,
 `CROSS_RUNTIME_POST_REVOCATION_VALIDITY`,
