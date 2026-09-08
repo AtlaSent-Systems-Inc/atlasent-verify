@@ -362,6 +362,53 @@ func TestLifecycleInvalid_DenyDecision(t *testing.T) {
 	}
 }
 
+// Lifecycle: a correlation whose ONLY in-export anchor is a permit-verification
+// (no Decision row present at all — e.g. a windowed/scoped export that omits
+// the evaluations array) is contradictory when that verification's outcome
+// never authorized an execution. This exercises the `!hasDec` branch of the
+// lifecycle check (verificationOutcomeAdmitsExecution), distinct from
+// TestLifecycleInvalid_DenyDecision above which exercises the `hasDec` branch.
+func TestLifecycleInvalid_VerificationOnlyNonAdmittingOutcome(t *testing.T) {
+	for _, outcome := range []string{"expired", "revoked", "invalid", "replay_blocked"} {
+		t.Run(outcome, func(t *testing.T) {
+			pub, priv, _ := ed25519.GenerateKey(nil)
+			corr := mkCorr(nil) // references ph1/d1
+			wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+				nil, // no evaluations at all — hasDec can never be true
+				[]map[string]any{mkVer(map[string]any{"outcome": outcome})},
+				[]map[string]any{corr})
+			res, _ := Verify(wire, memKeys{"eks_test": pub})
+			if !hasCode(res, CodeCorrelationLifecycleInvalid) {
+				t.Errorf("want CORRELATION_LIFECYCLE_INVALID for verification-only outcome %q; findings=%+v", outcome, res.Findings)
+			}
+		})
+	}
+}
+
+// Lifecycle: the converse of the above — a verification-only anchor (no
+// Decision in the export) whose outcome DOES admit an execution (verified or
+// mismatch) must NOT be treated as a lifecycle violation. Exercises the other
+// side of verificationOutcomeAdmitsExecution.
+func TestLifecycleValid_VerificationOnlyAdmittingOutcome(t *testing.T) {
+	for _, outcome := range []string{"verified", "mismatch"} {
+		t.Run(outcome, func(t *testing.T) {
+			pub, priv, _ := ed25519.GenerateKey(nil)
+			corr := mkCorr(nil) // references ph1/d1
+			wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+				nil, // no evaluations at all — hasDec can never be true
+				[]map[string]any{mkVer(map[string]any{"outcome": outcome})},
+				[]map[string]any{corr})
+			res, _ := Verify(wire, memKeys{"eks_test": pub})
+			if hasCode(res, CodeCorrelationLifecycleInvalid) {
+				t.Errorf("verification-only outcome %q must NOT be a lifecycle violation; findings=%+v", outcome, res.Findings)
+			}
+			if res.CorrelationRecordsVerified != 1 {
+				t.Errorf("verified=%d, want 1; findings=%+v", res.CorrelationRecordsVerified, res.Findings)
+			}
+		})
+	}
+}
+
 // Reference-missing: a correlation with neither decision_id nor permit_token_hash.
 func TestReferenceMissing(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
