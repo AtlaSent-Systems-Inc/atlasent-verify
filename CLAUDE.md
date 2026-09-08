@@ -174,15 +174,31 @@ active; that requires provider-enforced storage and a live acceptance run.
 
 #### Certification version gate
 
-`SupportedCertificationVersion = 5`. A **lower** version is accepted unchanged
-— v1–v4 bundles predate the archive sections and verify exactly as before,
-which is the backward-compatibility contract. A **higher** version fails closed
-(`UNSUPPORTED_CERTIFICATION_VERSION`): a newer producer may bind sections this
+**Corrected 2026-09-08 — this section previously said `SupportedCertificationVersion
+= 5`; that went stale when `atlasent-verify#28` shipped and was never updated here.**
+`SupportedCertificationVersion = 6` today. A **lower** version is accepted unchanged
+— v1–v4 bundles predate the archive sections (this page's own "Evidence Archive
+layer (certification version 5)" heading above) and v1–v5 bundles predate the H14
+Protection Continuity manifests added at v6, and both verify exactly as they did
+before, which is the backward-compatibility contract. A **higher** version fails
+closed (`UNSUPPORTED_CERTIFICATION_VERSION`): a newer producer may bind sections this
 build cannot see, and silently ignoring them would report a partial check as a
 complete one. The manifest's `record_counts` census is cross-checked against
 the arrays present (`CERTIFICATION_COUNT_MISMATCH`) — only for sections the
-manifest actually declares, so an older manifest is not treated as claiming
-zero.
+manifest actually declares (v6 adds `protection_configurations` to that census),
+so an older manifest is not treated as claiming zero.
+
+**v6** (`_shared/certified-copy.ts`, `atlasent-verify#28`) additionally folds
+`protection_configurations` (H14 secret-free Protection Continuity manifests)
+into `certification.bundle_sha256`'s hashed material — a 10th key that v5 and
+earlier never had in the hashed object at all. `checkCertificationBundleHash`
+picks the correct 9-key (v5-) or 10-key (v6) material shape from the
+**manifest's own declared version**, never from `SupportedCertificationVersion`,
+so a genuine v5 bundle keeps verifying byte-for-byte under a build that also
+understands v6. A mismatch here reports `CERTIFICATION_BUNDLE_HASH_MISMATCH`
+(distinct from `CERTIFICATION_COUNT_MISMATCH`: a count match doesn't prove
+byte-accuracy — a row edited in place without changing an array's length
+would pass the census check and still be caught by the hash recompute).
 
 Committed deterministic fixtures live in `cmd/atlasent-audit-verify/testdata/`
 (`archive-export.json`, signed once under a fixed key; the trusted keyfile is
@@ -508,6 +524,12 @@ internal/keys/                PEM keystore (kid → ed25519.PublicKey)
   release.yml                signed multi-platform release on vX.Y.Z tags
   reproducibility.yml        byte-identical reproducibility check on every PR
   canary.yml                 weekly trust-chain canary (Sigstore + golden fixtures)
+  parity.yml                 offline-verifier parity gate: strict-acceptance CLI
+                             run against a committed, signed, service-shaped
+                             v5 export (testdata/parity/) — closes pilot
+                             blocker B2 / SOC2 GAP-030
+  stack-base-guard.yml       stacked-PR base-guard check (pull_request_target,
+                             runs trusted guard code from main only)
 ```
 
 ## Key rules
@@ -522,8 +544,9 @@ internal/keys/                PEM keystore (kid → ed25519.PublicKey)
   the strict-acceptance section above.
 - **Backwards compatible** — the verifier accepts both the v5 prefixed `"ed25519:<base64url>"`
   signature format and the legacy plain base64 format. On the envelope path,
-  certification versions 1–5 are all accepted; a bundle with no Evidence
-  Archive sections verifies exactly as it did before those sections existed.
+  certification versions 1–6 are all accepted; a bundle with no Evidence
+  Archive sections (pre-v5) or no `protection_configurations` (pre-v6)
+  verifies exactly as it did before those sections existed.
 - **Never claim retention this tool cannot observe** — the verifier is offline
   by contract, so `retention_assurance` tops out at
   `recorded_not_verified_offline`. Do not add a branch that reports retention
