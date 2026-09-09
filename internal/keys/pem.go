@@ -10,6 +10,7 @@
 package keys
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/pem"
@@ -35,16 +36,32 @@ func LoadFile(path string) (*Store, error) {
 // Parse reads PEM bytes and returns a Store.
 func Parse(data []byte) (*Store, error) {
 	s := &Store{m: map[string]ed25519.PublicKey{}}
-	for {
-		block, rest := pem.Decode(data)
-		if block == nil {
-			break
+	remaining := bytes.TrimSpace(data)
+	for len(remaining) > 0 {
+		if !bytes.HasPrefix(remaining, []byte("-----BEGIN ")) {
+			return nil, errors.New("keys: unexpected non-PEM data in trust-root file")
 		}
-		data = rest
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			return nil, errors.New("keys: invalid PEM block")
+		}
+		remaining = bytes.TrimSpace(rest)
+
+		if block.Type != "PUBLIC KEY" && block.Type != "ATLASENT PUBLIC KEY" {
+			return nil, fmt.Errorf("keys: unsupported PEM block type %q", block.Type)
+		}
+		for header := range block.Headers {
+			if header != "kid" {
+				return nil, fmt.Errorf("keys: unsupported PEM header %q", header)
+			}
+		}
 
 		kid := block.Headers["kid"]
 		if kid == "" {
 			return nil, fmt.Errorf("keys: PEM block missing required 'kid' header")
+		}
+		if _, duplicate := s.m[kid]; duplicate {
+			return nil, fmt.Errorf("keys: duplicate kid %q", kid)
 		}
 
 		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
