@@ -49,7 +49,11 @@ func Parse(data []byte) (*Store, error) {
 		if bytes.Count(consumed, []byte("-----BEGIN ")) != 1 {
 			return nil, errors.New("keys: malformed PEM section before a decodable block")
 		}
-		if countPEMHeader(consumed, "kid") != 1 {
+		kidHeaders, err := countPEMHeader(consumed, "kid")
+		if err != nil {
+			return nil, fmt.Errorf("keys: %w", err)
+		}
+		if kidHeaders != 1 {
 			return nil, errors.New("keys: PEM block must contain exactly one 'kid' header")
 		}
 		remaining = bytes.TrimSpace(rest)
@@ -91,7 +95,7 @@ func Parse(data []byte) (*Store, error) {
 // block. encoding/pem exposes headers as a map and therefore erases duplicate
 // lines before Parse can inspect them; trust-root identity must be unambiguous
 // on the original bytes, not merely after last-value-wins decoding.
-func countPEMHeader(block []byte, wanted string) int {
+func countPEMHeader(block []byte, wanted string) (int, error) {
 	count := 0
 	lines := bytes.Split(block, []byte("\n"))
 	for _, line := range lines[1:] {
@@ -100,11 +104,15 @@ func countPEMHeader(block []byte, wanted string) int {
 		if colon < 0 {
 			continue
 		}
-		if string(line[:colon]) == wanted {
+		rawName := line[:colon]
+		if !bytes.Equal(rawName, bytes.TrimSpace(rawName)) {
+			return 0, fmt.Errorf("non-canonical PEM header name %q", rawName)
+		}
+		if string(rawName) == wanted {
 			count++
 		}
 	}
-	return count
+	return count, nil
 }
 
 // PublicKey implements chain.KeyStore.
