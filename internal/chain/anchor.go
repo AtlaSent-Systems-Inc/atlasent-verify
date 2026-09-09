@@ -49,6 +49,9 @@ func ParseAnchors(r io.Reader) (AnchorSet, error) {
 	if err := canonical.CheckNoDuplicateKeys(raw); err != nil {
 		return nil, fmt.Errorf("anchor: parse: %w", err)
 	}
+	if err := validateAnchorFieldNames(raw); err != nil {
+		return nil, fmt.Errorf("anchor: parse: %w", err)
+	}
 
 	var af anchorFile
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -85,6 +88,42 @@ func ParseAnchors(r io.Reader) (AnchorSet, error) {
 		set[a.OrgID] = a
 	}
 	return set, nil
+}
+
+// validateAnchorFieldNames rejects case-folded aliases before encoding/json
+// decodes into structs. The standard decoder matches struct fields without
+// regard to case, so `anchors` plus `Anchors` (or `org_id` plus `ORG_ID`)
+// would otherwise collapse to one field even though a case-sensitive reader
+// sees two distinct claims about the trusted head.
+func validateAnchorFieldNames(raw []byte) error {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return err
+	}
+	for field := range document {
+		if field != "anchors" {
+			return fmt.Errorf("unknown field %q", field)
+		}
+	}
+
+	anchorsRaw, ok := document["anchors"]
+	if !ok {
+		return nil
+	}
+	var anchors []map[string]json.RawMessage
+	if err := json.Unmarshal(anchorsRaw, &anchors); err != nil {
+		return err
+	}
+	for i, anchor := range anchors {
+		for field := range anchor {
+			switch field {
+			case "org_id", "sequence", "entry_hash":
+			default:
+				return fmt.Errorf("anchor[%d]: unknown field %q", i, field)
+			}
+		}
+	}
+	return nil
 }
 
 // CheckAnchors compares the verified per-org head in res against the
