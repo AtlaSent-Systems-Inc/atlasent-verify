@@ -96,6 +96,30 @@ func buildWire(t *testing.T, priv ed25519.PrivateKey, pub ed25519.PublicKey, ver
 	return wire
 }
 
+func replaceEmbeddedPEMAndResign(t *testing.T, wire []byte, priv ed25519.PrivateKey, embeddedPEM string) []byte {
+	t.Helper()
+	var env map[string]any
+	if err := json.Unmarshal(wire, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	delete(env, "signature")
+	env["public_key_pem"] = embeddedPEM
+	unsigned, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal unsigned envelope: %v", err)
+	}
+	canon, err := jcs.CanonicalizeRaw(unsigned)
+	if err != nil {
+		t.Fatalf("canonicalize envelope: %v", err)
+	}
+	env["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canon))
+	resigned, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal resigned envelope: %v", err)
+	}
+	return resigned
+}
+
 func toAnySlice(ms []map[string]any) []any {
 	out := make([]any, len(ms))
 	for i, m := range ms {
@@ -439,6 +463,57 @@ func TestUntrustedKey_NoKeystore(t *testing.T) {
 	}
 	if ok, _ := res.StrictOK(); ok {
 		t.Error("untrusted key must NOT pass strict acceptance")
+	}
+}
+
+func TestEmbeddedPublicKeyPEMAllowsSurroundingWhitespace(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	wire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")}, nil, nil)
+	wire = replaceEmbeddedPEMAndResign(t, wire, priv, "\n\t"+spkiPem(t, pub)+"  \n")
+
+	res, err := Verify(wire, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EnvelopeIntegrity != LayerUntrustedKey || !res.OK() {
+		t.Fatalf("surrounding whitespace must preserve embedded-key verification; integrity=%s findings=%+v", res.EnvelopeIntegrity, res.Findings)
+	}
+}
+
+func TestEmbeddedPublicKeyPEMRejectsAmbiguousInput(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	otherPub, _, _ := ed25519.GenerateKey(nil)
+	baseWire := buildWire(t, priv, pub, 1, "eks_test", "org-1",
+		[]map[string]any{mkEval("d1", "allow", "ph1", "")}, nil, nil)
+	good := spkiPem(t, pub)
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]string{
+		"leading junk":        "not-a-key\n" + good,
+		"trailing junk":       good + "not-a-key",
+		"second block":        good + spkiPem(t, otherPub),
+		"wrong label":         string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		"unexpected header":   string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Headers: map[string]string{"note": "decoy"}, Bytes: der})),
+		"malformed first PEM": "-----BEGIN PUBLIC KEY-----\nnote: broken\n" + good,
+	}
+	for name, embeddedPEM := range cases {
+		t.Run(name, func(t *testing.T) {
+			wire := replaceEmbeddedPEMAndResign(t, baseWire, priv, embeddedPEM)
+			res, err := Verify(wire, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.EnvelopeIntegrity != LayerInvalid || res.OK() {
+				t.Fatalf("ambiguous embedded key must be rejected; integrity=%s findings=%+v", res.EnvelopeIntegrity, res.Findings)
+			}
+			if !hasCode(res, CodeEnvelopeSignatureInvalid) {
+				t.Fatalf("want ENVELOPE_SIGNATURE_INVALID; findings=%+v", res.Findings)
+			}
+		})
 	}
 }
 

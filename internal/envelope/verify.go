@@ -452,8 +452,24 @@ func verifyOuterSignature(raw []byte, env *Envelope, keys chain.KeyStore, res *V
 }
 
 func parseEd25519SPKIPem(pemStr string) ed25519.PublicKey {
-	block, _ := pem.Decode([]byte(pemStr))
-	if block == nil {
+	raw := bytes.TrimSpace([]byte(pemStr))
+	if !bytes.HasPrefix(raw, []byte("-----BEGIN ")) {
+		return nil
+	}
+	block, rest := pem.Decode(raw)
+	if block == nil || len(bytes.TrimSpace(rest)) != 0 {
+		return nil
+	}
+	if block.Type != "PUBLIC KEY" || len(block.Headers) != 0 {
+		return nil
+	}
+	beginLines := 0
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("-----BEGIN ")) {
+			beginLines++
+		}
+	}
+	if beginLines != 1 {
 		return nil
 	}
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
