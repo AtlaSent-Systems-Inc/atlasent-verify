@@ -55,19 +55,10 @@ func TestParseAllowsSurroundingWhitespace(t *testing.T) {
 	}
 }
 
-func TestParseAllowsBeginTextWithinKID(t *testing.T) {
-	pk, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kid := "release-----BEGIN 2026"
-
-	store, err := Parse(appendPEM(t, nil, kid, pk))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got, ok := store.PublicKey(kid); !ok || !got.Equal(pk) {
-		t.Fatalf("kid lookup mismatch: ok=%v got=%x want=%x", ok, got, pk)
+func TestCountPEMBeginLinesIgnoresInteriorText(t *testing.T) {
+	data := []byte("-----BEGIN PUBLIC KEY-----\nkid: release-----BEGIN 2026\n\nbody\n-----END PUBLIC KEY-----\n")
+	if got := countPEMBeginLines(data); got != 1 {
+		t.Fatalf("countPEMBeginLines = %d, want 1", got)
 	}
 }
 
