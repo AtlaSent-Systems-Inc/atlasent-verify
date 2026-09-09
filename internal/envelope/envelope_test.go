@@ -185,6 +185,33 @@ func TestAcceptance01_LegacyNDJSON_CorrelationAbsent(t *testing.T) {
 	}
 }
 
+func TestLooksLikeEnvelopeRequiresOneUnambiguousJSONObject(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "envelope", raw: `{"version":1,"evaluations":[]}`, want: true},
+		{name: "surrounding whitespace", raw: " \n\t" + `{"version":1,"evaluations":[]}` + "\n ", want: true},
+		{name: "null distinctive field is still envelope shaped", raw: `{"version":1,"evaluations":null}`, want: true},
+		{name: "two objects", raw: `{"version":1,"evaluations":[]} {"version":1}`, want: false},
+		{name: "trailing scalar", raw: `{"version":1,"evaluations":[]} null`, want: false},
+		{name: "stray closing brace", raw: `{"version":1,"evaluations":[]}}`, want: false},
+		{name: "stray closing bracket", raw: `{"version":1,"evaluations":[]}]`, want: false},
+		{name: "null chain version remains chain shaped", raw: `{"chain_version":null,"evaluations":[]}`, want: false},
+		{name: "null entry hash remains chain shaped", raw: `{"entry_hash":null,"evaluations":[]}`, want: false},
+		{name: "single chain row", raw: `{"chain_version":5,"entry_hash":"abc"}`, want: false},
+		{name: "top-level array", raw: `[{"version":1,"evaluations":[]}]`, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LooksLikeEnvelope([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("LooksLikeEnvelope() = %v, want %v for %q", got, tc.want, tc.raw)
+			}
+		})
+	}
+}
+
 // 2. R3 envelope without correlations succeeds (correlation absent).
 func TestAcceptance02_EnvelopeNoCorrelations(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
