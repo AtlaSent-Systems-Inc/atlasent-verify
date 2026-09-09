@@ -55,6 +55,22 @@ func TestParseAllowsSurroundingWhitespace(t *testing.T) {
 	}
 }
 
+func TestParseAllowsBeginTextWithinKID(t *testing.T) {
+	pk, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid := "release-----BEGIN 2026"
+
+	store, err := Parse(appendPEM(t, nil, kid, pk))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, ok := store.PublicKey(kid); !ok || !got.Equal(pk) {
+		t.Fatalf("kid lookup mismatch: ok=%v got=%x want=%x", ok, got, pk)
+	}
+}
+
 func TestParseRejectsAmbiguousTrustRootInput(t *testing.T) {
 	pk1, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
