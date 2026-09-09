@@ -65,16 +65,18 @@ func TestParseAnchorsValid(t *testing.T) {
 func TestParseAnchorsRejectsBad(t *testing.T) {
 	valid := `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `"}]}`
 	cases := map[string]string{
-		"empty":         `{"anchors":[]}`,
-		"missing org":   `{"anchors":[{"sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `"}]}`,
-		"zero sequence": `{"anchors":[{"org_id":"o","sequence":0,"entry_hash":"` + strings.Repeat("a", 64) + `"}]}`,
-		"short hash":    `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"abc"}]}`,
-		"non-hex hash":  `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("z", 64) + `"}]}`,
-		"unknown field": `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `","x":1}]}`,
-		"duplicate org": `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `"},{"org_id":"o","sequence":2,"entry_hash":"` + strings.Repeat("b", 64) + `"}]}`,
-		"not json":      `nope`,
-		"trailing value": valid + `{}`,
-		"trailing junk":  valid + `not-json`,
+		"empty":              `{"anchors":[]}`,
+		"missing org":        `{"anchors":[{"sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `"}]}`,
+		"zero sequence":      `{"anchors":[{"org_id":"o","sequence":0,"entry_hash":"` + strings.Repeat("a", 64) + `"}]}`,
+		"short hash":         `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"abc"}]}`,
+		"non-hex hash":       `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("z", 64) + `"}]}`,
+		"duplicate root key": `{"anchors":[],"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `"}]}`,
+		"duplicate hash key": `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `","entry_hash":"` + strings.Repeat("b", 64) + `"}]}`,
+		"unknown field":      `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `","x":1}]}`,
+		"duplicate org":      `{"anchors":[{"org_id":"o","sequence":1,"entry_hash":"` + strings.Repeat("a", 64) + `"},{"org_id":"o","sequence":2,"entry_hash":"` + strings.Repeat("b", 64) + `"}]}`,
+		"not json":           `nope`,
+		"trailing value":     valid + `{}`,
+		"trailing junk":      valid + `not-json`,
 	}
 	for name, in := range cases {
 		if _, err := ParseAnchors(strings.NewReader(in)); err == nil {
