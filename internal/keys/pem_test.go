@@ -73,17 +73,24 @@ func TestParseRejectsAmbiguousTrustRootInput(t *testing.T) {
 	if bytes.Equal(duplicateHeader, first) {
 		t.Fatal("duplicate-header fixture replacement did not apply")
 	}
+	normalizedDuplicateHeader := bytes.Replace(first,
+		[]byte("kid: runtime-v1\n"),
+		[]byte("kid: runtime-v1\n kid: runtime-v2\n"), 1)
+	if bytes.Equal(normalizedDuplicateHeader, first) {
+		t.Fatal("normalized-duplicate-header fixture replacement did not apply")
+	}
 	malformedPrefix := append([]byte("-----BEGIN PUBLIC KEY-----\nkid: broken\n"), first...)
 	wrongType := encodePEM(t, "PRIVATE KEY", map[string]string{"kid": "runtime-v1"}, pk1)
 	unknownHeader := encodePEM(t, "PUBLIC KEY", map[string]string{"kid": "runtime-v1", "KID": "runtime-v2"}, pk1)
 	cases := map[string][]byte{
-		"duplicate kid":    duplicate,
-		"duplicate header": duplicateHeader,
-		"malformed prefix": malformedPrefix,
-		"leading junk":     append([]byte("not-a-trust-root\n"), first...),
-		"trailing junk":    append(append([]byte{}, first...), []byte("not-a-trust-root")...),
-		"wrong PEM type":   wrongType,
-		"unknown header":   unknownHeader,
+		"duplicate kid":               duplicate,
+		"duplicate header":            duplicateHeader,
+		"normalized duplicate header": normalizedDuplicateHeader,
+		"malformed prefix":            malformedPrefix,
+		"leading junk":                append([]byte("not-a-trust-root\n"), first...),
+		"trailing junk":               append(append([]byte{}, first...), []byte("not-a-trust-root")...),
+		"wrong PEM type":              wrongType,
+		"unknown header":              unknownHeader,
 	}
 	for name, input := range cases {
 		t.Run(name, func(t *testing.T) {
