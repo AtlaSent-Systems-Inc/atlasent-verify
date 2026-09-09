@@ -110,6 +110,103 @@ func TestVerifyHappyPath(t *testing.T) {
 	}
 }
 
+func TestVerifyAcceptsJSONWhitespaceAndCRLFFraming(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := buildEntry(t, make([]byte, 32), 1, sk, map[string]any{"k": "v1"})
+
+	// Blank physical lines remain permitted, as do the four whitespace bytes
+	// allowed by JSON. ScanLines removes the CR immediately before each LF.
+	raw := append([]byte(" \t\r\n\t "), entry...)
+	raw = append(raw, []byte(" \t\r\n\r\n")...)
+	res, err := Verify(bytes.NewReader(raw), memKeys{pk: pk})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(res.Findings) != 0 {
+		t.Fatalf("expected valid JSON whitespace and CRLF framing to pass, got: %+v", res.Findings)
+	}
+	if res.EntriesScanned != 1 || res.SignaturesVerified != 1 {
+		t.Fatalf("scanned=%d verified=%d, want 1 and 1", res.EntriesScanned, res.SignaturesVerified)
+	}
+}
+
+func TestVerifyRejectsNonJSONWhitespaceFraming(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := buildEntry(t, make([]byte, 32), 1, sk, map[string]any{"k": "v1"})
+
+	tests := []struct {
+		name   string
+		prefix []byte
+	}{
+		{name: "form feed", prefix: []byte{'\f'}},
+		{name: "vertical tab", prefix: []byte{'\v'}},
+		{name: "non-breaking space", prefix: []byte("\u00a0")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := append(append([]byte{}, tt.prefix...), entry...)
+			res, err := Verify(bytes.NewReader(raw), memKeys{pk: pk})
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if res.EntriesScanned != 0 || res.SignaturesVerified != 0 {
+				t.Fatalf("malformed framing was processed: scanned=%d verified=%d", res.EntriesScanned, res.SignaturesVerified)
+			}
+			if len(res.Findings) != 1 || res.Findings[0].Kind != "parse_error" || res.Findings[0].LineNumber != 1 {
+				t.Fatalf("expected one line-1 parse_error, got: %+v", res.Findings)
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsMultipleJSONValuesOnOneLine(t *testing.T) {
+	_, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := buildEntry(t, make([]byte, 32), 1, sk, map[string]any{"k": "v1"})
+	raw := append(append([]byte{}, entry...), []byte(` {}`)...)
+
+	res, err := Verify(bytes.NewReader(raw), nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if res.EntriesScanned != 0 {
+		t.Fatalf("scanned=%d, want 0 for two JSON values on one physical line", res.EntriesScanned)
+	}
+	if len(res.Findings) != 1 || res.Findings[0].Kind != "parse_error" || res.Findings[0].LineNumber != 1 {
+		t.Fatalf("expected one line-1 parse_error, got: %+v", res.Findings)
+	}
+}
+
+func TestVerifyFailsClosedOnOversizedLaterLine(t *testing.T) {
+	pk, sk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := buildEntry(t, make([]byte, 32), 1, sk, map[string]any{"k": "v1"})
+	raw := append(append(append([]byte{}, entry...), '\n'), bytes.Repeat([]byte{'x'}, maxNDJSONLineBytes+1)...)
+
+	res, err := Verify(bytes.NewReader(raw), memKeys{pk: pk})
+	if err == nil {
+		t.Fatal("expected an oversized NDJSON line to return a scan error")
+	}
+	if !strings.Contains(err.Error(), "chain: scan:") {
+		t.Fatalf("error=%q, want chain scan context", err)
+	}
+	// The valid prefix may be reported for diagnostics, but the non-nil error
+	// prevents callers from accepting that partial result as a complete chain.
+	if res.EntriesScanned != 1 || res.SignaturesVerified != 1 {
+		t.Fatalf("valid prefix scanned=%d verified=%d, want 1 and 1", res.EntriesScanned, res.SignaturesVerified)
+	}
+}
+
 func TestVerifyDetectsTamper(t *testing.T) {
 	pk, sk, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
