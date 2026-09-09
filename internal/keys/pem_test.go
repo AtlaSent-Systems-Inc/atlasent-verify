@@ -1,6 +1,7 @@
 package keys
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -19,7 +20,7 @@ func TestParseLooksUpPublicKeyByKID(t *testing.T) {
 	}
 
 	pemBytes := appendPEM(t, nil, "runtime-v1", pk1)
-	pemBytes = appendPEM(t, pemBytes, "runtime-v2", pk2)
+	pemBytes = append(pemBytes, encodePEM(t, "ATLASENT PUBLIC KEY", map[string]string{"kid": "runtime-v2"}, pk2)...)
 
 	store, err := Parse(pemBytes)
 	if err != nil {
@@ -33,6 +34,77 @@ func TestParseLooksUpPublicKeyByKID(t *testing.T) {
 	}
 	if _, ok := store.PublicKey("missing"); ok {
 		t.Fatal("missing kid unexpectedly resolved")
+	}
+}
+
+func TestParseAllowsSurroundingWhitespace(t *testing.T) {
+	pk, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := appendPEM(t, nil, "runtime-v1", pk)
+	pemBytes = append([]byte("\n\t"), pemBytes...)
+	pemBytes = append(pemBytes, []byte("\n  ")...)
+
+	store, err := Parse(pemBytes)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, ok := store.PublicKey("runtime-v1"); !ok || !got.Equal(pk) {
+		t.Fatalf("runtime-v1 lookup mismatch: ok=%v got=%x want=%x", ok, got, pk)
+	}
+}
+
+func TestCountPEMBeginLinesIgnoresInteriorText(t *testing.T) {
+	data := []byte("-----BEGIN PUBLIC KEY-----\nkid: release-----BEGIN 2026\n\nbody\n-----END PUBLIC KEY-----\n")
+	if got := countPEMBeginLines(data); got != 1 {
+		t.Fatalf("countPEMBeginLines = %d, want 1", got)
+	}
+}
+
+func TestParseRejectsAmbiguousTrustRootInput(t *testing.T) {
+	pk1, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk2, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := appendPEM(t, nil, "runtime-v1", pk1)
+	duplicate := appendPEM(t, append([]byte{}, first...), "runtime-v1", pk2)
+	duplicateHeader := bytes.Replace(first,
+		[]byte("kid: runtime-v1\n"),
+		[]byte("kid: runtime-v1\nkid: runtime-v2\n"), 1)
+	if bytes.Equal(duplicateHeader, first) {
+		t.Fatal("duplicate-header fixture replacement did not apply")
+	}
+	normalizedDuplicateHeader := bytes.Replace(first,
+		[]byte("kid: runtime-v1\n"),
+		[]byte("kid: runtime-v1\n kid: runtime-v2\n"), 1)
+	if bytes.Equal(normalizedDuplicateHeader, first) {
+		t.Fatal("normalized-duplicate-header fixture replacement did not apply")
+	}
+	malformedPrefix := append([]byte("-----BEGIN PUBLIC KEY-----\nkid: broken\n"), first...)
+	wrongType := encodePEM(t, "PRIVATE KEY", map[string]string{"kid": "runtime-v1"}, pk1)
+	unknownHeader := encodePEM(t, "PUBLIC KEY", map[string]string{"kid": "runtime-v1", "KID": "runtime-v2"}, pk1)
+	cases := map[string][]byte{
+		"duplicate kid":               duplicate,
+		"duplicate header":            duplicateHeader,
+		"normalized duplicate header": normalizedDuplicateHeader,
+		"malformed prefix":            malformedPrefix,
+		"leading junk":                append([]byte("not-a-trust-root\n"), first...),
+		"trailing junk":               append(append([]byte{}, first...), []byte("not-a-trust-root")...),
+		"wrong PEM type":              wrongType,
+		"unknown header":              unknownHeader,
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse(input); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
 	}
 }
 
@@ -99,10 +171,14 @@ func TestParseHasNoRevocationConcept(t *testing.T) {
 }
 
 func appendPEM(t *testing.T, dst []byte, kid string, pk ed25519.PublicKey) []byte {
+	return append(dst, encodePEM(t, "PUBLIC KEY", map[string]string{"kid": kid}, pk)...)
+}
+
+func encodePEM(t *testing.T, blockType string, headers map[string]string, pk ed25519.PublicKey) []byte {
 	t.Helper()
 	der, err := x509.MarshalPKIXPublicKey(pk)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return append(dst, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Headers: map[string]string{"kid": kid}, Bytes: der})...)
+	return pem.EncodeToMemory(&pem.Block{Type: blockType, Headers: headers, Bytes: der})
 }
