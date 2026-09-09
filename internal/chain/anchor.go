@@ -1,11 +1,14 @@
 package chain
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
+
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/canonical"
 )
 
 // HeadAnchor is an out-of-band, trusted assertion of an org's chain
@@ -34,12 +37,21 @@ type anchorFile struct {
 //
 //	{"anchors": [{"org_id": "...", "sequence": 42, "entry_hash": "<64-hex>"}]}
 //
-// Unknown fields, missing org_id, sequence < 1, a non-64-char
-// entry_hash, or a duplicate org_id are all errors — an anchor that
-// cannot be trusted to mean exactly one thing is worse than none.
+// Unknown or duplicate fields, missing org_id, sequence < 1, a non-hex or
+// non-64-char entry_hash, a duplicate org_id, or trailing input are all
+// errors — an anchor that cannot be trusted to mean exactly one thing is
+// worse than none.
 func ParseAnchors(r io.Reader) (AnchorSet, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("anchor: read: %w", err)
+	}
+	if err := canonical.CheckNoDuplicateKeys(raw); err != nil {
+		return nil, fmt.Errorf("anchor: parse: %w", err)
+	}
+
 	var af anchorFile
-	dec := json.NewDecoder(r)
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&af); err != nil {
 		return nil, fmt.Errorf("anchor: parse: %w", err)
