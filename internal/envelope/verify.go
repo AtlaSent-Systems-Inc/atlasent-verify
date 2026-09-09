@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/canonical"
 	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/chain"
@@ -37,32 +38,30 @@ func LooksLikeEnvelope(raw []byte) bool {
 	}
 	// Must be a single JSON object with no trailing content (NDJSON fails this).
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
-	var probe struct {
-		ChainVersion  *json.RawMessage `json:"chain_version"`
-		EntryHash     *json.RawMessage `json:"entry_hash"`
-		PublicKeyPEM  *json.RawMessage `json:"public_key_pem"`
-		Evaluations   *json.RawMessage `json:"evaluations"`
-		Correlations  *json.RawMessage `json:"correlation_events"`
-		Verifications *json.RawMessage `json:"verification_events"`
-		Retrievals    *json.RawMessage `json:"retrieval_events"`
-		Probes        *json.RawMessage `json:"probe_events"`
-	}
+	var probe map[string]json.RawMessage
 	if err := dec.Decode(&probe); err != nil {
 		return false
 	}
-	if dec.More() {
-		return false // more than one top-level value → NDJSON, not an envelope
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return false // trailing value or malformed bytes → not one exact object
 	}
 	// A chain entry carries chain_version + entry_hash; an envelope never does.
-	if probe.ChainVersion != nil || probe.EntryHash != nil {
+	if _, ok := probe["chain_version"]; ok {
 		return false
 	}
-	return probe.PublicKeyPEM != nil ||
-		probe.Evaluations != nil ||
-		probe.Correlations != nil ||
-		probe.Verifications != nil ||
-		probe.Retrievals != nil ||
-		probe.Probes != nil
+	if _, ok := probe["entry_hash"]; ok {
+		return false
+	}
+	for _, key := range []string{
+		"public_key_pem", "evaluations", "correlation_events",
+		"verification_events", "retrieval_events", "probe_events",
+	} {
+		if _, ok := probe[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseEnvelope decodes raw JSON bytes into an Envelope struct. It performs no
