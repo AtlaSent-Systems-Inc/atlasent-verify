@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,6 +44,13 @@ func ParseAnchors(r io.Reader) (AnchorSet, error) {
 	if err := dec.Decode(&af); err != nil {
 		return nil, fmt.Errorf("anchor: parse: %w", err)
 	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("anchor: parse: trailing JSON value")
+		}
+		return nil, fmt.Errorf("anchor: parse: trailing data: %w", err)
+	}
 	if len(af.Anchors) == 0 {
 		return nil, fmt.Errorf("anchor: file contains no anchors")
 	}
@@ -55,6 +63,9 @@ func ParseAnchors(r io.Reader) (AnchorSet, error) {
 			return nil, fmt.Errorf("anchor[%d] (org %s): sequence must be >= 1, got %d", i, a.OrgID, a.Sequence)
 		case len(a.EntryHash) != 64:
 			return nil, fmt.Errorf("anchor[%d] (org %s): entry_hash must be 64-char hex, got %d chars", i, a.OrgID, len(a.EntryHash))
+		}
+		if _, err := hex.DecodeString(a.EntryHash); err != nil {
+			return nil, fmt.Errorf("anchor[%d] (org %s): entry_hash must be 64-char hex: %w", i, a.OrgID, err)
 		}
 		if _, dup := set[a.OrgID]; dup {
 			return nil, fmt.Errorf("anchor: duplicate org_id %q", a.OrgID)
