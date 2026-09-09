@@ -24,6 +24,11 @@ const GenesisPreviousHashHex = "000000000000000000000000000000000000000000000000
 // MinChainVersion is the minimum chain_version this verifier supports.
 const MinChainVersion = 5
 
+// maxNDJSONLineBytes bounds one physical NDJSON record. Audit payloads can be
+// tens of KB, so the limit is intentionally generous while still preventing
+// an unbounded allocation for a missing or attacker-controlled newline.
+const maxNDJSONLineBytes = 4 * 1024 * 1024
+
 // Entry is the v5 audit-chain entry shape.
 //
 // `Payload` is held as raw JSON so the canonicalizer sees the
@@ -129,7 +134,7 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 	res := &Result{HeadByOrg: map[string]int64{}, HeadHashByOrg: map[string]string{}}
 	sc := bufio.NewScanner(r)
 	// Allow large lines: payloads can be tens of KB.
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), maxNDJSONLineBytes)
 
 	// Track per-org chain state: previous_hash (bytes) of the prior
 	// entry we accepted, and the expected next sequence.
@@ -142,8 +147,12 @@ func Verify(r io.Reader, keys KeyStore) (*Result, error) {
 	line := 0
 	for sc.Scan() {
 		line++
-		raw := bytes.TrimSpace(sc.Bytes())
-		if len(raw) == 0 {
+		raw := sc.Bytes()
+		// JSON permits only space, tab, carriage return, and line feed as
+		// insignificant whitespace. Do not use bytes.TrimSpace here: it also
+		// strips form-feed, vertical-tab, and Unicode spaces, which would make
+		// malformed framing verify differently from a strict JSON consumer.
+		if len(bytes.Trim(raw, " \t\r\n")) == 0 {
 			continue
 		}
 
