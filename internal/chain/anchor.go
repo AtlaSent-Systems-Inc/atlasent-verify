@@ -1,10 +1,14 @@
 package chain
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
+
+	"github.com/AtlaSent-Systems-Inc/atlasent-verify/internal/canonical"
 )
 
 // HeadAnchor is an out-of-band, trusted assertion of an org's chain
@@ -33,15 +37,34 @@ type anchorFile struct {
 //
 //	{"anchors": [{"org_id": "...", "sequence": 42, "entry_hash": "<64-hex>"}]}
 //
-// Unknown fields, missing org_id, sequence < 1, a non-64-char
-// entry_hash, or a duplicate org_id are all errors — an anchor that
-// cannot be trusted to mean exactly one thing is worse than none.
+// Unknown or duplicate fields, missing org_id, sequence < 1, a non-hex or
+// non-64-char entry_hash, a duplicate org_id, or trailing input are all
+// errors — an anchor that cannot be trusted to mean exactly one thing is
+// worse than none.
 func ParseAnchors(r io.Reader) (AnchorSet, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("anchor: read: %w", err)
+	}
+	if err := canonical.CheckNoDuplicateKeys(raw); err != nil {
+		return nil, fmt.Errorf("anchor: parse: %w", err)
+	}
+	if err := validateAnchorFieldNames(raw); err != nil {
+		return nil, fmt.Errorf("anchor: parse: %w", err)
+	}
+
 	var af anchorFile
-	dec := json.NewDecoder(r)
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&af); err != nil {
 		return nil, fmt.Errorf("anchor: parse: %w", err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("anchor: parse: trailing JSON value")
+		}
+		return nil, fmt.Errorf("anchor: parse: trailing data: %w", err)
 	}
 	if len(af.Anchors) == 0 {
 		return nil, fmt.Errorf("anchor: file contains no anchors")
@@ -56,12 +79,51 @@ func ParseAnchors(r io.Reader) (AnchorSet, error) {
 		case len(a.EntryHash) != 64:
 			return nil, fmt.Errorf("anchor[%d] (org %s): entry_hash must be 64-char hex, got %d chars", i, a.OrgID, len(a.EntryHash))
 		}
+		if _, err := hex.DecodeString(a.EntryHash); err != nil {
+			return nil, fmt.Errorf("anchor[%d] (org %s): entry_hash must be 64-char hex: %w", i, a.OrgID, err)
+		}
 		if _, dup := set[a.OrgID]; dup {
 			return nil, fmt.Errorf("anchor: duplicate org_id %q", a.OrgID)
 		}
 		set[a.OrgID] = a
 	}
 	return set, nil
+}
+
+// validateAnchorFieldNames rejects case-folded aliases before encoding/json
+// decodes into structs. The standard decoder matches struct fields without
+// regard to case, so `anchors` plus `Anchors` (or `org_id` plus `ORG_ID`)
+// would otherwise collapse to one field even though a case-sensitive reader
+// sees two distinct claims about the trusted head.
+func validateAnchorFieldNames(raw []byte) error {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return err
+	}
+	for field := range document {
+		if field != "anchors" {
+			return fmt.Errorf("unknown field %q", field)
+		}
+	}
+
+	anchorsRaw, ok := document["anchors"]
+	if !ok {
+		return nil
+	}
+	var anchors []map[string]json.RawMessage
+	if err := json.Unmarshal(anchorsRaw, &anchors); err != nil {
+		return err
+	}
+	for i, anchor := range anchors {
+		for field := range anchor {
+			switch field {
+			case "org_id", "sequence", "entry_hash":
+			default:
+				return fmt.Errorf("anchor[%d]: unknown field %q", i, field)
+			}
+		}
+	}
+	return nil
 }
 
 // CheckAnchors compares the verified per-org head in res against the
