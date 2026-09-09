@@ -45,6 +45,13 @@ func Parse(data []byte) (*Store, error) {
 		if block == nil {
 			return nil, errors.New("keys: invalid PEM block")
 		}
+		consumed := remaining[:len(remaining)-len(rest)]
+		if bytes.Count(consumed, []byte("-----BEGIN ")) != 1 {
+			return nil, errors.New("keys: malformed PEM section before a decodable block")
+		}
+		if countPEMHeader(consumed, "kid") != 1 {
+			return nil, errors.New("keys: PEM block must contain exactly one 'kid' header")
+		}
 		remaining = bytes.TrimSpace(rest)
 
 		if block.Type != "PUBLIC KEY" && block.Type != "ATLASENT PUBLIC KEY" {
@@ -78,6 +85,26 @@ func Parse(data []byte) (*Store, error) {
 		return nil, errors.New("keys: no PEM blocks found")
 	}
 	return s, nil
+}
+
+// countPEMHeader counts exact, case-sensitive header lines in the raw PEM
+// block. encoding/pem exposes headers as a map and therefore erases duplicate
+// lines before Parse can inspect them; trust-root identity must be unambiguous
+// on the original bytes, not merely after last-value-wins decoding.
+func countPEMHeader(block []byte, wanted string) int {
+	count := 0
+	lines := bytes.Split(block, []byte("\n"))
+	for _, line := range lines[1:] {
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		colon := bytes.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		if string(line[:colon]) == wanted {
+			count++
+		}
+	}
+	return count
 }
 
 // PublicKey implements chain.KeyStore.
