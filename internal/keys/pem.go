@@ -46,7 +46,7 @@ func Parse(data []byte) (*Store, error) {
 			return nil, errors.New("keys: invalid PEM block")
 		}
 		consumed := remaining[:len(remaining)-len(rest)]
-		if bytes.Count(consumed, []byte("-----BEGIN ")) != 1 {
+		if countPEMBeginLines(consumed) != 1 {
 			return nil, errors.New("keys: malformed PEM section before a decodable block")
 		}
 		kidHeaders, err := countPEMHeader(consumed, "kid")
@@ -89,6 +89,19 @@ func Parse(data []byte) (*Store, error) {
 		return nil, errors.New("keys: no PEM blocks found")
 	}
 	return s, nil
+}
+
+// countPEMBeginLines counts PEM boundary markers only when they begin a line.
+// Header values are otherwise unrestricted and may legitimately contain the
+// text "-----BEGIN ".
+func countPEMBeginLines(data []byte) int {
+	count := 0
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("-----BEGIN ")) {
+			count++
+		}
+	}
+	return count
 }
 
 // countPEMHeader counts exact, case-sensitive header lines in the raw PEM
