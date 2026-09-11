@@ -272,11 +272,25 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: atlasent-audit-verify ${{ steps.version.outputs.label }}
-          tag_name: ${{ github.ref_name }}
+          # Use the already-derived version label, not github.ref_name, for
+          # tag_name/prerelease/make_latest below. On a tag push the two are
+          # identical (steps.version.outputs.label is computed FROM
+          # github.ref_name in that branch), so this is a no-op for the
+          # normal release path. On workflow_dispatch they diverge:
+          # github.ref_name is whatever branch/tag was picked to dispatch
+          # FROM (e.g. "main"), while steps.version.outputs.label is the
+          # manually-typed inputs.version (e.g. "v0.1.0-dev"). Using
+          # github.ref_name here would tag_name the release "main" while
+          # its build labels, filenames, and release title all say
+          # "v0.1.0-dev" -- a real, publishable mismatch for a tool whose
+          # entire purpose is supply-chain integrity. Never actually fired
+          # (zero workflow_dispatch runs of this workflow to date, confirmed
+          # via the Actions API) but worth closing before it does.
+          tag_name: ${{ steps.version.outputs.label }}
           # RC / pre-release tags (anything with a hyphen, e.g. v0.1.0-rc.1) are
           # published as pre-releases and are NOT marked "latest".
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ !contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.version.outputs.label, '-') }}
+          make_latest: ${{ !contains(steps.version.outputs.label, '-') }}
           body: |
             The **offline, source-open AtlaSent audit-chain verifier** (ADR-020).
             Read-only: no network I/O, no database access, no developer tools or
