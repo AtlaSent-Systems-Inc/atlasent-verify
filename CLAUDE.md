@@ -485,25 +485,61 @@ The counts backing this live on `chain.Result` (`SignaturesVerified` /
 `SignaturesSkipped`) with the pure contract helper
 `Result.StrictSignatureAcceptance(keysSupplied bool)`.
 
-### engine_version — ADDITIVE METADATA, NOT in the chain hash
+### engine_version — TWO hash forms exist; the current producer INCLUDES it
 
-**INVARIANT: `engine_version` is NOT included in the chain hash.**
+> **CORRECTED 2026-09-19. This section previously read "INVARIANT: `engine_version`
+> is NOT included in the chain hash" and instructed "Do not include
+> `engine_version` in any hash recomputation." That is the opposite of what this
+> verifier has done since `atlasent-verify#28`, and it is stale in the actively
+> harmful direction**: a reader trusting it would "fix" `canonicalizeForHash` by
+> deleting the current producer form, breaking verification of every freshly
+> exported chain that carries the field. Found by running the strict-acceptance
+> CLI against the committed parity fixture and reading the
+> `engine_version_legacy_hash_form` warning it emits — the warning contradicted
+> this file, and the code was right.
 
-The AtlaSent runtime writes `engine_version` to the `audit_events` table as an
-additive evidence field. It was deliberately excluded from the canonical payload
-fed to SHA-256 (see the audit chain v5 spec and the migration log entry for
-`20260524020000_audit_chain_v5_engine_version.sql`).
+**There is no single invariant here. There are two documented hash forms, and
+the verifier tries both, in a fixed order.**
 
-Consequence for the verifier: when recomputing `entry_hash`, the verifier strips
-`engine_version` (along with `entry_hash` and `signature`) from the entry before
-canonicalizing. This means:
+The divergence is real and producer-side (`atlasent-verify#28`):
+`_shared/audit-v5-projection.ts::buildV5EntryForHash` — reached via
+`v1-export-audit-stream`, the deployed caller — **includes** `engine_version` in
+the hashed entry object whenever the projected row carries one. This verifier's
+original behavior, and the audit-chain v5 spec's stated design ("engine_version
+is additive metadata, not a hash input"), **excluded** it.
 
-- An entry WITH `engine_version` in the exported JSON verifies correctly.
-- An entry WITHOUT `engine_version` verifies correctly.
-- The presence or absence of the field does not affect the hash.
+`canonicalizeForHash(raw, keepEngineVersion bool)` implements both:
 
-Do not include `engine_version` in any hash recomputation. Any change to this
-invariant is a canonical-form spec version bump.
+1. **Primary — the CURRENT producer form** (`keepEngineVersion: true`).
+   `engine_version` is left in the map and hashed. This is what a fresh export
+   actually produces today.
+2. **Fallback — the LEGACY form** (`keepEngineVersion: false`). `engine_version`
+   is deleted before hashing. Attempted only when the primary form fails to
+   match, so entries produced under the prior behavior still verify.
+
+Three properties of that fallback are load-bearing and must not be "simplified":
+
+- **It is always surfaced as an `engine_version_legacy_hash_form` warning.** A
+  chain that needed the fallback is auditable, never silently indistinguishable
+  from one that matched on the current form. Do not downgrade or suppress it.
+- **It is NOT gated on `e.EngineVersion != nil`.** A legacy entry with
+  `"engine_version": null` explicitly on the wire unmarshals to the same nil
+  `*string` as an absent key — Go cannot tell those apart through a typed
+  pointer — so gating would skip the fallback for exactly the entries needing
+  it. Always attempting it on a primary mismatch is cheap and safe.
+- **An entry carrying no `engine_version` hashes identically under both forms**
+  (deleting an absent key is a no-op), so this affects only entries that carry
+  the field. Every other chain is unaffected.
+
+`entry_hash` and `signature` are still ALWAYS removed before hashing — they are
+the hash and its proof, never inputs to it. That part of the old text was right.
+
+**The committed parity fixture (`testdata/parity/`) is a LEGACY-form chain** and
+verifies via the fallback, emitting that warning on all three entries while still
+reaching `ACCEPTED` under `--require-signatures`. That is expected, not a defect
+— but it does mean the parity gate does not currently exercise the primary,
+current-producer path end to end. A fixture regenerated from today's producer
+would.
 
 ## Architecture
 
