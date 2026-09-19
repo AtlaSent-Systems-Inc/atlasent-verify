@@ -534,12 +534,32 @@ Three properties of that fallback are load-bearing and must not be "simplified":
 `entry_hash` and `signature` are still ALWAYS removed before hashing — they are
 the hash and its proof, never inputs to it. That part of the old text was right.
 
-**The committed parity fixture (`testdata/parity/`) is a LEGACY-form chain** and
-verifies via the fallback, emitting that warning on all three entries while still
-reaching `ACCEPTED` under `--require-signatures`. That is expected, not a defect
-— but it does mean the parity gate does not currently exercise the primary,
-current-producer path end to end. A fixture regenerated from today's producer
-would.
+**`testdata/parity/` now commits BOTH forms, and the parity gate asserts both**
+(added 2026-09-19, same pass as the correction above):
+
+| Fixture | Form | What the gate asserts |
+|---|---|---|
+| `chain.ndjson` / `head.json` | LEGACY (`engine_version` excluded) | strict-accepts, **and still emits** the `engine_version_legacy_hash_form` warning |
+| `chain-current-form.ndjson` / `head-current-form.json` | CURRENT producer (`engine_version` included) | strict-accepts, and **does NOT** emit that warning |
+
+Until 2026-09-19 only the legacy fixture existed, so the parity gate — the one
+closing pilot blocker **B2** / SOC2 **GAP-030** — reached `ACCEPTED` exclusively
+through the *fallback* and never once exercised the hash form a fresh export
+actually takes. Green, while the real code path went untested. Found by reading
+the warning this very section was corrected over.
+
+**The load-bearing assertion on the current-form fixture is the ABSENCE of the
+warning, not exit 0.** Exit 0 cannot distinguish "matched the current form" from
+"failed it and was rescued by the fallback" — which is exactly how the gap stayed
+invisible. The mirror assertion on the legacy fixture requires the warning to
+still appear, so the fallback cannot go silent either.
+
+Keep both. The legacy form is not obsolete — chains in it are real and must keep
+verifying, so deleting its coverage trades one gap for another. One key serves
+both fixtures (the signature is over the `entry_hash` digest, and only the digest
+differs between forms). Regenerate both with
+`go run testdata/parity/gen/main.go` — **not** `go run ./testdata/parity/gen`,
+which fails on the `//go:build ignore` tag.
 
 ## Architecture
 
