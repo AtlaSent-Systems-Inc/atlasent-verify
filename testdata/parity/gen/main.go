@@ -25,7 +25,10 @@
 // canonicalizer (internal/canonical), so the canonical-form contract
 // exercised here is identical to the one the runtime must satisfy.
 //
-// Regenerate:  go run ./testdata/parity/gen
+// Regenerate:  go run testdata/parity/gen/main.go
+//
+//	(NOT `go run ./testdata/parity/gen` — the //go:build ignore tag makes
+//	 the package-path form fail with "build constraints exclude all Go files")
 package main
 
 import (
@@ -55,13 +58,65 @@ const keyVersion = "audit-r3-2026-07"
 
 const orgID = "org_parity_fixture_0001"
 
-// hashExcludedFields are stripped before canonicalization for the chain
-// hash, mirroring internal/chain.canonicalizeForHash exactly:
-//   - entry_hash / signature are the hash and its proof, not inputs.
-//   - engine_version is additive metadata, deliberately NOT in the hash
-//     (audit chain v5). Emitting it here, yet excluding it from the hash,
-//     exercises that invariant end-to-end.
-var hashExcludedFields = []string{"entry_hash", "signature", "engine_version"}
+// alwaysExcludedFields are stripped before canonicalization in BOTH hash
+// forms: entry_hash and signature are the hash and its proof, never inputs
+// to it.
+var alwaysExcludedFields = []string{"entry_hash", "signature"}
+
+// TWO fixtures are generated, because the verifier accepts TWO hash forms
+// and a fixture can only be in one of them (atlasent-verify#28):
+//
+//   - LEGACY form (engine_version EXCLUDED from the hash) — what this
+//     generator produced exclusively until 2026-09-19, and what the
+//     original single fixture is. Real chains in this form exist: they were
+//     produced before the producer started folding the field into the hash.
+//     The verifier still accepts them, via a fallback that emits an
+//     engine_version_legacy_hash_form warning.
+//   - CURRENT form (engine_version INCLUDED in the hash) — what
+//     _shared/audit-v5-projection.ts::buildV5EntryForHash actually emits
+//     today, reached via v1-export-audit-stream, the deployed caller. This
+//     is the primary form internal/chain tries first.
+//
+// Until 2026-09-19 only the legacy fixture existed, so the parity gate —
+// the one closing pilot blocker B2 / SOC2 GAP-030 — reached ACCEPTED
+// exclusively through the FALLBACK and never exercised the primary path a
+// fresh export actually takes. Generating both is strictly additive: the
+// legacy fixture keeps its coverage (that fallback is deployed behavior and
+// deleting its test would be a regression), and the current-form fixture
+// adds the path that was missing.
+type hashForm struct {
+	// name is used in the generated filenames.
+	name string
+	// keepEngineVersion mirrors internal/chain.canonicalizeForHash's
+	// parameter of the same name.
+	keepEngineVersion bool
+	chainFile         string
+	headFile          string
+}
+
+var hashForms = []hashForm{
+	{
+		name:              "legacy (engine_version excluded)",
+		keepEngineVersion: false,
+		chainFile:         "chain.ndjson",
+		headFile:          "head.json",
+	},
+	{
+		name:              "current producer (engine_version included)",
+		keepEngineVersion: true,
+		chainFile:         "chain-current-form.ndjson",
+		headFile:          "head-current-form.json",
+	},
+}
+
+// excludedFor returns the fields stripped before canonicalization for the
+// given form.
+func excludedFor(f hashForm) []string {
+	if f.keepEngineVersion {
+		return alwaysExcludedFields
+	}
+	return append(append([]string{}, alwaysExcludedFields...), "engine_version")
+}
 
 func main() {
 	seed, err := hex.DecodeString(seedHex)
@@ -120,60 +175,87 @@ func main() {
 		},
 	}
 
-	prev := make([]byte, 32) // genesis previous_hash = 32 zero bytes
-	var lines [][]byte
-	var headSeq int64
-	var headHash string
-
-	for i, e := range entries {
-		seq := int64(i + 1)
-		e["chain_version"] = json.Number("5")
-		e["org_id"] = orgID
-		e["sequence"] = json.Number(fmt.Sprintf("%d", seq))
-		e["key_version"] = keyVersion
-		e["previous_hash"] = hex.EncodeToString(prev)
-
-		// Hash input = canonical(entry minus hash-excluded fields).
-		hashInput := map[string]any{}
-		for k, v := range e {
-			hashInput[k] = v
-		}
-		for _, f := range hashExcludedFields {
-			delete(hashInput, f)
-		}
-		cb, err := canonical.Bytes(hashInput)
-		if err != nil {
-			fatal(fmt.Errorf("canonicalize entry %d: %w", seq, err))
-		}
-		h := sha256.New()
-		h.Write(prev)
-		h.Write(cb)
-		digest := h.Sum(nil)
-
-		e["entry_hash"] = hex.EncodeToString(digest)
-		// v5 prefixed signature format: "ed25519:<base64url-no-padding>".
-		e["signature"] = "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, digest))
-
-		line, err := json.Marshal(e)
-		if err != nil {
-			fatal(fmt.Errorf("marshal entry %d: %w", seq, err))
-		}
-		lines = append(lines, line)
-
-		prev = digest
-		headSeq = seq
-		headHash = hex.EncodeToString(digest)
-	}
-
 	outDir := "testdata/parity"
 
-	// chain.ndjson
-	var ndjson []byte
-	for _, l := range lines {
-		ndjson = append(ndjson, l...)
-		ndjson = append(ndjson, '\n')
+	// Both hash forms are generated from the SAME entries and the SAME key.
+	// Only the hash input differs, so any divergence between the two
+	// fixtures is attributable to engine_version and nothing else.
+	for _, form := range hashForms {
+		excluded := excludedFor(form)
+
+		prev := make([]byte, 32) // genesis previous_hash = 32 zero bytes
+		var lines [][]byte
+		var headSeq int64
+		var headHash string
+
+		for i, src := range entries {
+			seq := int64(i + 1)
+
+			// Copy: each form re-derives entry_hash/signature/previous_hash
+			// from the same source entry, so the second pass must not see
+			// the first pass's values.
+			e := map[string]any{}
+			for k, v := range src {
+				e[k] = v
+			}
+
+			e["chain_version"] = json.Number("5")
+			e["org_id"] = orgID
+			e["sequence"] = json.Number(fmt.Sprintf("%d", seq))
+			e["key_version"] = keyVersion
+			e["previous_hash"] = hex.EncodeToString(prev)
+
+			// Hash input = canonical(entry minus this form's excluded fields).
+			hashInput := map[string]any{}
+			for k, v := range e {
+				hashInput[k] = v
+			}
+			for _, f := range excluded {
+				delete(hashInput, f)
+			}
+			cb, err := canonical.Bytes(hashInput)
+			if err != nil {
+				fatal(fmt.Errorf("canonicalize entry %d (%s): %w", seq, form.name, err))
+			}
+			h := sha256.New()
+			h.Write(prev)
+			h.Write(cb)
+			digest := h.Sum(nil)
+
+			e["entry_hash"] = hex.EncodeToString(digest)
+			// v5 prefixed signature format: "ed25519:<base64url-no-padding>".
+			e["signature"] = "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, digest))
+
+			line, err := json.Marshal(e)
+			if err != nil {
+				fatal(fmt.Errorf("marshal entry %d (%s): %w", seq, form.name, err))
+			}
+			lines = append(lines, line)
+
+			prev = digest
+			headSeq = seq
+			headHash = hex.EncodeToString(digest)
+		}
+
+		var ndjson []byte
+		for _, l := range lines {
+			ndjson = append(ndjson, l...)
+			ndjson = append(ndjson, '\n')
+		}
+		writeFile(filepath.Join(outDir, form.chainFile), ndjson)
+
+		formAnchor := map[string]any{
+			"anchors": []map[string]any{
+				{"org_id": orgID, "sequence": headSeq, "entry_hash": headHash},
+			},
+		}
+		fa, err := json.MarshalIndent(formAnchor, "", "  ")
+		if err != nil {
+			fatal(err)
+		}
+		fa = append(fa, '\n')
+		writeFile(filepath.Join(outDir, form.headFile), fa)
 	}
-	writeFile(filepath.Join(outDir, "chain.ndjson"), ndjson)
 
 	// keys.pem — PUBLIC key only, with the kid header the CLI selects on.
 	der, err := x509.MarshalPKIXPublicKey(pub)
@@ -187,21 +269,10 @@ func main() {
 	})
 	writeFile(filepath.Join(outDir, "keys.pem"), pemBytes)
 
-	// head.json — trusted anchor for the completeness / anti-truncation check.
-	anchor := map[string]any{
-		"anchors": []map[string]any{
-			{"org_id": orgID, "sequence": headSeq, "entry_hash": headHash},
-		},
-	}
-	aj, err := json.MarshalIndent(anchor, "", "  ")
-	if err != nil {
-		fatal(err)
-	}
-	aj = append(aj, '\n')
-	writeFile(filepath.Join(outDir, "head.json"), aj)
-
-	fmt.Printf("wrote %d-entry chain, keys.pem (kid=%s), head.json (org=%s seq=%d)\n",
-		len(lines), keyVersion, orgID, headSeq)
+	// One key serves both fixtures: the signature is over the entry_hash
+	// digest, and only the digest differs between the forms.
+	fmt.Printf("wrote %d fixture form(s) of %d entries each, keys.pem (kid=%s), org=%s\n",
+		len(hashForms), len(entries), keyVersion, orgID)
 }
 
 func writeFile(path string, b []byte) {
