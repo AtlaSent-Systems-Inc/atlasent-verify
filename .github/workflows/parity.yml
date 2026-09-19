@@ -76,6 +76,59 @@ jobs:
             2>&1 | tee /tmp/parity-output.txt
           echo "::notice::CLI exited 0 under --require-signatures (parity OK)"
 
+      # The fixture above is in the LEGACY hash form (engine_version
+      # EXCLUDED), so it reaches ACCEPTED through internal/chain's fallback.
+      # Until 2026-09-19 that was the ONLY committed fixture, which meant
+      # this gate never exercised the hash form a FRESH export actually
+      # takes — engine_version INCLUDED, per
+      # _shared/audit-v5-projection.ts::buildV5EntryForHash via the deployed
+      # v1-export-audit-stream caller (atlasent-verify#28).
+      #
+      # Both fixtures are kept and both are asserted. The legacy one is not
+      # obsolete: chains in that form are real and must keep verifying.
+      - name: Verify current-producer-form fixture (strict acceptance + head anchor)
+        run: |
+          set -o pipefail
+          /tmp/atlasent-audit-verify \
+            --chain "${FIXTURE_DIR}/chain-current-form.ndjson" \
+            --keys  "${FIXTURE_DIR}/keys.pem" \
+            --head  "${FIXTURE_DIR}/head-current-form.json" \
+            --require-signatures \
+            2>&1 | tee /tmp/parity-output-current.txt
+          echo "::notice::current-producer-form fixture strict-accepted"
+
+      # The load-bearing assertion for the current-form fixture is the
+      # ABSENCE of the legacy-fallback warning. Exit 0 alone cannot
+      # distinguish "matched the current form" from "failed it and was
+      # rescued by the fallback" — which is exactly how the coverage gap
+      # stayed invisible while this gate was green.
+      - name: Assert the current-form fixture did NOT use the legacy fallback
+        run: |
+          out=/tmp/parity-output-current.txt
+
+          grep -qF 'ACCEPTED (--require-signatures)' "$out" \
+            || { echo "::error::current-form fixture not strict-accepted"; exit 1; }
+
+          if grep -qF 'engine_version_legacy_hash_form' "$out"; then
+            echo "::error::the current-form fixture verified only via the LEGACY"
+            echo "::error::engine_version-excluded fallback, so this gate is once"
+            echo "::error::again not covering the primary producer path."
+            echo "::error::Regenerate with: go run testdata/parity/gen/main.go"
+            exit 1
+          fi
+          echo "::notice::primary (engine_version-included) hash path exercised"
+
+      # And the mirror assertion on the legacy fixture: it must still
+      # verify AND must still warn. A silent fallback would make a chain
+      # that needed it indistinguishable from one matching the current
+      # form — the ambiguity internal/chain's warning exists to prevent.
+      - name: Assert the legacy fixture still warns when it falls back
+        run: |
+          out=/tmp/parity-output.txt
+          grep -qF 'engine_version_legacy_hash_form' "$out" \
+            || { echo "::error::legacy fixture verified WITHOUT the fallback warning — either it is no longer in the legacy form, or the warning was suppressed"; exit 1; }
+          echo "::notice::legacy fallback still exercised and still visible"
+
       # Belt-and-suspenders: assert the positive evidence lines are
       # present and that no signature was skipped. Under
       # --require-signatures a skip already forces exit 1, but these

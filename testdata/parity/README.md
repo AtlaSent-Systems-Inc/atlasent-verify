@@ -12,10 +12,37 @@ parity").
 
 | File | What it is |
 |---|---|
-| `chain.ndjson` | A 3-entry v5 audit-chain export (`evaluation.completed` events; allow/deny mix; `decision` / `decision_id` / `engine_version` / evaluation `payload` populated as the runtime writes them). |
-| `keys.pem` | The Ed25519 **public** key, with a `kid` header equal to each entry's `key_version` (`audit-r3-2026-07`). |
-| `head.json` | The trusted head anchor (`org_id`, highest `sequence`, that entry's `entry_hash`) for the `--head` anti-truncation / completeness check. |
-| `gen/main.go` | The deterministic generator that produced the three files above (build-tagged `//go:build ignore`). |
+| `chain.ndjson` | A 3-entry v5 audit-chain export in the **LEGACY hash form** (`engine_version` EXCLUDED from the hash). `evaluation.completed` events; allow/deny mix; `decision` / `decision_id` / `engine_version` / evaluation `payload` populated as the runtime writes them. |
+| `head.json` | Trusted head anchor for `chain.ndjson`. |
+| `chain-current-form.ndjson` | **The same three entries, same key, in the CURRENT PRODUCER hash form** (`engine_version` INCLUDED). |
+| `head-current-form.json` | Trusted head anchor for `chain-current-form.ndjson`. |
+| `keys.pem` | The Ed25519 **public** key, with a `kid` header equal to each entry's `key_version` (`audit-r3-2026-07`). One key serves both fixtures — the signature is over the `entry_hash` digest, and only the digest differs between forms. |
+| `gen/main.go` | The deterministic generator that produced all of the above (build-tagged `//go:build ignore`; run it as `go run testdata/parity/gen/main.go`, not `go run ./testdata/parity/gen`). |
+
+## Why there are two hash forms (added 2026-09-19)
+
+`internal/chain` accepts **two** hash forms, because a real producer/verifier
+divergence exists (`atlasent-verify#28`):
+
+- **Current producer form** — `engine_version` is **included** in the hashed
+  entry. This is what `_shared/audit-v5-projection.ts::buildV5EntryForHash`
+  emits, reached via `v1-export-audit-stream`, the deployed caller. The
+  verifier tries this **first**.
+- **Legacy form** — `engine_version` is **excluded**. The verifier's original
+  behavior. Chains in this form are real (produced before the change) and must
+  keep verifying, so it is kept as a fallback — always surfaced as an
+  `engine_version_legacy_hash_form` warning.
+
+**Until 2026-09-19 only the legacy fixture existed.** The parity gate therefore
+reached `ACCEPTED` exclusively through the *fallback* and never exercised the
+primary path a fresh export actually takes — green, while the real code path
+went untested. Adding the current-form fixture is strictly additive: the legacy
+fixture keeps its coverage, and the gap is closed.
+
+The load-bearing assertion on the current-form fixture is the **absence** of
+the legacy warning. Exit 0 alone cannot distinguish "matched the current form"
+from "failed it and was rescued by the fallback" — which is precisely how the
+gap stayed invisible.
 
 ## What the CI job runs
 
