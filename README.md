@@ -27,7 +27,7 @@ For a fully static build, use `CGO_ENABLED=0`.
 ## Install a signed release
 
 Download the binary for your platform from the
-[Releases](https://github.com/AtlaSent-Systems-Inc/atlasent-verify/releases)
+[Releases](https://github.com/Atlasent/atlasent-verify/releases)
 page and verify it before use. Release artifacts are signed with Sigstore Cosign
 using GitHub Actions OIDC, so no long-lived AtlaSent release-signing key is
 required.
@@ -36,7 +36,7 @@ Example:
 
 ```bash
 cosign verify-blob \
-  --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-verify/.*' \
+  --certificate-identity-regexp 'https://github.com/Atlasent/atlasent-verify/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --signature <artifact>.sig \
   --certificate <artifact>.pem \
@@ -255,7 +255,7 @@ bytes covered by the hash requires a versioned contract change.
 ## Public verification material
 
 Published verifier keys, revocations, and trust-root material live in the public
-[`atlasent-keys`](https://github.com/AtlaSent-Systems-Inc/atlasent-keys)
+[`atlasent-keys`](https://github.com/Atlasent/atlasent-keys)
 repository. Release-artifact authenticity is separately verifiable through
 Sigstore/Cosign and GitHub's transparency infrastructure.
 
