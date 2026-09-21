@@ -13,7 +13,7 @@ name: release
 #   3. Signs each artifact + the checksum file with Sigstore Cosign
 #      (keyless OIDC signing). Anyone can verify via:
 #        cosign verify-blob \
-#          --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-verify/.*' \
+#          --certificate-identity-regexp 'https://github.com/Atlasent/atlasent-verify/.*' \
 #          --certificate-oidc-issuer https://token.actions.githubusercontent.com \
 #          --signature <artifact>.sig \
 #          --certificate <artifact>.pem \
@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: AtlaSent release gate
         id: atlasent_gate
-        uses: atlasent-systems-inc/atlasent-action@v1
+        uses: Atlasent/atlasent-action@v1
         env:
           ATLASENT_API_KEY: ${{ secrets.ATLASENT_API_KEY }}
         with:
@@ -258,7 +258,7 @@ jobs:
       - name: Attest build provenance (SLSA)
         # GitHub-native build provenance for each released binary. Records a
         # signed attestation in the repo's attestation store; verifiable with:
-        #   gh attestation verify <binary> --repo AtlaSent-Systems-Inc/atlasent-verify
+        #   gh attestation verify <binary> --repo Atlasent/atlasent-verify
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
@@ -321,11 +321,11 @@ jobs:
             sha256sum -c CHECKSUMS.txt
             # 2) Sigstore signature (per artifact, or the CHECKSUMS file once)
             cosign verify-blob \
-              --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-verify/.*' \
+              --certificate-identity-regexp 'https://github.com/Atlasent/atlasent-verify/.*' \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               --signature <artifact>.sig --certificate <artifact>.pem <artifact>
             # 3) GitHub build provenance
-            gh attestation verify <artifact> --repo AtlaSent-Systems-Inc/atlasent-verify
+            gh attestation verify <artifact> --repo Atlasent/atlasent-verify
             ```
             Builds are byte-for-byte reproducible (verified on every PR by the
             reproducibility workflow).
@@ -339,8 +339,8 @@ jobs:
             Authenticode signing.
 
             ## License & security
-            License: see [`LICENSE`](https://github.com/AtlaSent-Systems-Inc/atlasent-verify/blob/main/LICENSE).
-            Report a vulnerability: [Security policy](https://github.com/AtlaSent-Systems-Inc/atlasent-verify/blob/main/SECURITY.md)
+            License: see [`LICENSE`](https://github.com/Atlasent/atlasent-verify/blob/main/LICENSE).
+            Report a vulnerability: [Security policy](https://github.com/Atlasent/atlasent-verify/blob/main/SECURITY.md)
             (private GitHub Security Advisories).
           fail_on_unmatched_files: true
           files: |
