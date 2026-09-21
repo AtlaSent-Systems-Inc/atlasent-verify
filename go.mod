@@ -1,3 +1,3 @@
-module github.com/AtlaSent-Systems-Inc/atlasent-verify
+module github.com/Atlasent/atlasent-verify
 
 go 1.24
